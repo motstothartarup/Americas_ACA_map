@@ -29,21 +29,18 @@ RADIUS = {"large": 8, "medium": 7, "small": 6}
 STROKE = 2
 
 LABEL_GAP_PX = 10
-SHOW_AT = dict(large=2, medium=3, small=4)
+SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
 PAD_PX = 2
 
-# NEW: max drift (“few millimeters”) and step between candidates
-DRIFT_PX = 28   # max distance a label may move from its dot (≈7–8 mm)
-STEP_PX  = 6    # keep (not used by solver now, but fine to leave)
+# Placement solver knobs
+DRIFT_PX = 28     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
+ITERS    = 24     # relaxation iterations
+FSTEP    = 0.55   # solver step (0.45–0.65 good)
 
-# NEW: solver tuning
-ITERS    = 24   # number of relaxation iterations
-FSTEP    = 0.55 # integration step for forces (0.45–0.65 is a good band)
-
+EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
-EXT_FRACTION = 0.20  # ~20% zoom extension window
 
 
 # ---------- helpers ----------
@@ -233,7 +230,7 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: smart placement near dot (cardinals + diagonals within DRIFT_PX) ---
+    # --- JS: physics-style relaxation to push labels apart within DRIFT_PX ---
     js = r"""
 <script>
 (function(){
@@ -246,7 +243,6 @@ def build_map() -> folium.Map:
   const ITERS = __ITERS__;
   const FSTEP = __FSTEP__;
 
-  // ---------- helpers ----------
   function getContainer(){ return map.getContainer(); }
   function rectBase(){
     const crect = getContainer().getBoundingClientRect();
@@ -259,32 +255,26 @@ def build_map() -> folium.Map:
   function overlaps(A,B,p){
     return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
   }
-  function mtv(A,B){ // minimal translation vector between axis-aligned rects
+  function mtv(A,B){ // minimal translation vector between rects
     const ac = center(A), bc = center(B);
     const dx = bc.x - ac.x, dy = bc.y - ac.y;
     const px = (A.w/2 + B.w/2) - Math.abs(dx);
     const py = (A.h/2 + B.h/2) - Math.abs(dy);
     if (px <= 0 || py <= 0) return null;
-    if (px < py){
-      return { x: Math.sign(dx) * px, y: 0 };
-    }else{
-      return { x: 0, y: Math.sign(dy) * py };
-    }
+    if (px < py) return { x: Math.sign(dx) * px, y: 0 };
+    return { x: 0, y: Math.sign(dy) * py };
   }
-  function rectCirclePenetration(R, Cx, Cy, Cr){ // penetration vector from circle to rect
+  function rectCirclePenetration(R, Cx, Cy, Cr){
     const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
     const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
-    let dx = (center(R).x - Cx), dy = (center(R).y - Cy);
     const qx = Cx - rx, qy = Cy - ry;
     const d2 = qx*qx + qy*qy;
     const r  = Cr + PAD;
     if (d2 >= r*r) return null;
     const d = Math.max(1e-6, Math.sqrt(d2));
-    // push away from circle center; if center sits inside, use rect center vector
-    const ux = (d > 0 ? (qx/d) : (dx===0?1:Math.sign(dx)));
-    const uy = (d > 0 ? (qy/d) : (dy===0?0:Math.sign(dy)));
+    const ux = qx / d, uy = qy / d;
     const pen = r - d;
-    return { x: -ux * pen, y: -uy * pen }; // vector to move rect out of circle
+    return { x: -ux * pen, y: -uy * pen }; // move away from circle
   }
   function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
   function ensureWrap(el){
@@ -300,7 +290,6 @@ def build_map() -> folium.Map:
     return txt;
   }
 
-  // Collect labels with dot info and measure base rect (transform = 0)
   function collect(rect){
     const items=[];
     map.eachLayer(lyr=>{
@@ -324,7 +313,6 @@ def build_map() -> folium.Map:
     return items;
   }
 
-  // simple crowd score (labels in a 70px radius)
   function scoreDensity(items){
     const R = 70;
     for (let i=0;i<items.length;i++){
@@ -348,7 +336,6 @@ def build_map() -> folium.Map:
     let items = collect(rect);
     if (!items.length) return;
 
-    // zoom gating + extended keep
     const z = map.getZoom();
     const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
     let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
@@ -368,7 +355,6 @@ def build_map() -> folium.Map:
     items = items.filter(it => it.el.style.display !== 'none');
     if (!items.length) return;
 
-    // priority: higher density first, then size, then y,x
     scoreDensity(items);
     items.sort((a,b)=>{
       const d = b.density - a.density; if (d) return d;
@@ -379,80 +365,69 @@ def build_map() -> folium.Map:
     const W = map.getSize().x, H = map.getSize().y;
     const boundsMargin = 2;
 
-    // relaxation loop
     for (let t=0; t<ITERS; t++){
-      // precompute rects
       const rects = items.map(it => rectFrom(it, it.dx, it.dy));
       const fx = new Array(items.length).fill(0);
       const fy = new Array(items.length).fill(0);
 
-      // pairwise label-label pushes
       for (let i=0;i<items.length;i++){
         for (let j=i+1;j<items.length;j++){
           const v = mtv(rects[i], rects[j]);
           if (!v) continue;
-          // split the push
           fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
           fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
         }
       }
 
-      // label-dot (circle) separation + spring to anchor + edge pushes
       for (let i=0;i<items.length;i++){
         const it = items[i];
         const R  = rects[i];
-
-        // dot (circle) push
         const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
         if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
 
-        // spring back to anchor (stay near dot)
+        // spring to anchor
         fx[i] += -0.05 * it.dx;
         fy[i] += -0.05 * it.dy;
 
-        // edge keep-in
+        // edges
         if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
         if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
         if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
         if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
       }
 
-      // integrate + clamp drift
       for (let i=0;i<items.length;i++){
-        items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
-        items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
+        items[i].dx = Math.max(-DRIFT, Math.min(DRIFT, items[i].dx + FSTEP*fx[i]));
+        items[i].dy = Math.max(-DRIFT, Math.min(DRIFT, items[i].dy + FSTEP*fy[i]));
       }
     }
 
-    // apply & final filtering in extended window
-    const finalRects = items.map(it => rectFrom(it, it.dx, it.dy));
+    const finals = items.map(it => rectFrom(it, it.dx, it.dy));
     for (let i=0;i<items.length;i++){
       const it = items[i];
-      const R  = finalRects[i];
-      // if still mutually overlapping badly in the *extension* keep-range, hide
+      const R  = finals[i];
       let collides = false;
       for (let j=0;j<items.length;j++){
         if (i===j) continue;
-        if (overlaps(R, finalRects[j], PAD)) { collides = true; break; }
+        if (overlaps(R, finals[j], PAD)) { collides = true; break; }
       }
       const inExt = (z < it.__baseGate) && (z >= it.__extGate);
       if (collides && inExt){
         it.el.style.display = 'none';
       }else{
-        it.txt.style.transform = `translate(${Math.round(it.dx)}px, ${Math.round(it.dy)}px)`;
-        if (collides) it.txt.style.opacity = '0.9';
+        it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
+        if (collides) it.txt.style.opacity = "0.9";
       }
     }
   }
 
-  // schedule
   let raf1=0, raf2=0;
   function schedule(){
     if (raf1) cancelAnimationFrame(raf1);
     if (raf2) cancelAnimationFrame(raf2);
-    raf1 = requestAnimationFrame(()=>{ raf2 = requestAnimationFrame(solve); });
+    raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
   }
-  map.whenReady(()=> setTimeout(schedule, 400));
+  map.whenReady(function(){ setTimeout(schedule, 400); });
   map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
 
   const pane = map.getPanes().tooltipPane;
@@ -462,21 +437,18 @@ def build_map() -> folium.Map:
   }
 })();
 </script>
-
-
 """
 
-    # Substitute tokens (won’t touch any ${dx} in the JS)
+    # Substitute tokens (no ${...} conflicts)
     js = js.replace("__MAP__", m.get_name())
     js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
     js = js.replace("__PAD__",  str(int(PAD_PX)))
-    js = js.replace("__STEP__", str(int(STEP_PX)))
-    js = js.replace("__DRIFT__",str(int(DRIFT_PX)))
+    js = js.replace("__DRIFT__", str(int(DRIFT_PX)))
     js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
     js = js.replace("__ITERS__",  str(int(ITERS)))
-    js = js.replace("__FSTEP__",   str(FSTEP))\
-    m.get_root().html.add_child(folium.Element(js))
+    js = js.replace("__FSTEP__",  str(FSTEP))
 
+    m.get_root().html.add_child(folium.Element(js))
     return m
 
 
