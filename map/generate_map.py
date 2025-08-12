@@ -165,7 +165,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "solver-r3.3"
+    SOLVER_VER = "solver-r3.4"
 
     # --- CSS + footer badge (no f-strings; tokens replaced) ---
     badge_html = r"""
@@ -235,245 +235,242 @@ def build_map() -> folium.Map:
     folium.LayerControl(collapsed=False).add_to(m)
 
     # --- JS: physics-style relaxation to push labels apart within DRIFT_PX ---
+    # IMPORTANT: this goes into the *script bucket* WITHOUT <script> tags.
     js = r"""
-<script>
-(function(){
-  // boot marker
-  console.debug("[ACA] solver bootstrap start r3.3");
+// boot marker
+console.debug("[ACA] solver bootstrap start r3.4");
 
-  // Folium map variable injected via placeholder
-  const MAP = __MAP__;
-  const SHOWZ = __SHOWZ__;
-  const PAD   = __PAD__;
-  const PRIOR = {large:0, medium:1, small:2};
-  const DRIFT = __DRIFT__;
-  const EXTFRAC = __EXTFRAC__;
-  const ITERS = __ITERS__;
-  const FSTEP = __FSTEP__;
+// Folium map variable injected via placeholder
+const MAP = __MAP__;
+const SHOWZ = __SHOWZ__;
+const PAD   = __PAD__;
+const PRIOR = {large:0, medium:1, small:2};
+const DRIFT = __DRIFT__;
+const EXTFRAC = __EXTFRAC__;
+const ITERS = __ITERS__;
+const FSTEP = __FSTEP__;
 
-  function until(cond, cb, tries=80, delay=100){
-    (function tick(n){
-      if (cond()) return cb();
-      if (n<=0) return;
-      setTimeout(()=>tick(n-1), delay);
-    })(tries);
+function until(cond, cb, tries=80, delay=100){
+  (function tick(n){
+    if (cond()) return cb();
+    if (n<=0) return;
+    setTimeout(()=>tick(n-1), delay);
+  })(tries);
+}
+
+until(
+  ()=> typeof MAP !== "undefined" && MAP && MAP.getPanes && MAP.getContainer,
+  init,
+  80, 100
+);
+
+function init(){
+  const map = MAP;
+  console.debug("[ACA] solver r3.4 init on", map);
+
+  // Visual proof the script runs: briefly outline tooltips
+  const styleTag = document.createElement("style");
+  styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
+  document.head.appendChild(styleTag);
+  setTimeout(()=> styleTag.remove(), 1500);
+
+  function getContainer(){ return map.getContainer(); }
+  function rectBase(){
+    const crect = getContainer().getBoundingClientRect();
+    return function rect(el){
+      const r = el.getBoundingClientRect();
+      return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
+    };
+  }
+  function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
+  function overlaps(A,B,p){
+    return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
+  }
+  function mtv(A,B){
+    const ac = center(A), bc = center(B);
+    const dx = bc.x - ac.x, dy = bc.y - ac.y;
+    const px = (A.w/2 + B.w/2) - Math.abs(dx);
+    const py = (A.h/2 + B.h/2) - Math.abs(dy);
+    if (px <= 0 || py <= 0) return null;
+    if (px < py) return { x: Math.sign(dx) * px, y: 0 };
+    return { x: 0, y: Math.sign(dy) * py };
+  }
+  function rectCirclePenetration(R, Cx, Cy, Cr){
+    const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
+    const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
+    const qx = Cx - rx, qy = Cy - ry;
+    const d2 = qx*qx + qy*qy;
+    const r  = Cr + PAD;
+    if (d2 >= r*r) return null;
+    const d = Math.max(1e-6, Math.sqrt(d2));
+    const ux = qx / d, uy = qy / d;
+    const pen = r - d;
+    return { x: -ux * pen, y: -uy * pen };
+  }
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+  function ensureWrap(el){
+    let txt = el.querySelector('.ttxt');
+    if (!txt){
+      const span = document.createElement('span');
+      span.className = 'ttxt';
+      span.textContent = el.textContent;
+      el.textContent = '';
+      el.appendChild(span);
+      txt = span;
+    }
+    return txt;
   }
 
-  until(
-    ()=> typeof MAP !== "undefined" && MAP && MAP.getPanes && MAP.getContainer,
-    init,
-    80, 100
-  );
+  function collect(rect){
+    const items=[];
+    map.eachLayer(lyr=>{
+      if (!(lyr instanceof L.CircleMarker)) return;
+      const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
+      if (!tt) return;
+      if (!tt._container) tt.update();
+      const el = tt._container;
+      if (!el || !el.classList.contains('iata-tt')) return;
 
-  function init(){
-    const map = MAP;
-    console.debug("[ACA] solver r3.3 init on", map);
+      const cls = Array.from(el.classList);
+      const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
+      const txt = ensureWrap(el);
+      txt.style.transform = 'translate(0px,0px)'; // reset to measure
+      const baseRect = rect(txt);
+      const latlng = lyr.getLatLng();
+      const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
+      const pt = map.latLngToContainerPoint(latlng);
+      items.push({ el, txt, size, baseRect, latlng, radius, pt, dx:0, dy:0, density:0 });
+    });
+    return items;
+  }
 
-    // Visual proof the script runs: briefly outline tooltips
-    const styleTag = document.createElement("style");
-    styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
-    document.head.appendChild(styleTag);
-    setTimeout(()=> styleTag.remove(), 1500);
-
-    function getContainer(){ return map.getContainer(); }
-    function rectBase(){
-      const crect = getContainer().getBoundingClientRect();
-      return function rect(el){
-        const r = el.getBoundingClientRect();
-        return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
-      };
-    }
-    function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
-    function overlaps(A,B,p){
-      return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
-    }
-    function mtv(A,B){
-      const ac = center(A), bc = center(B);
-      const dx = bc.x - ac.x, dy = bc.y - ac.y;
-      const px = (A.w/2 + B.w/2) - Math.abs(dx);
-      const py = (A.h/2 + B.h/2) - Math.abs(dy);
-      if (px <= 0 || py <= 0) return null;
-      if (px < py) return { x: Math.sign(dx) * px, y: 0 };
-      return { x: 0, y: Math.sign(dy) * py };
-    }
-    function rectCirclePenetration(R, Cx, Cy, Cr){
-      const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
-      const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
-      const qx = Cx - rx, qy = Cy - ry;
-      const d2 = qx*qx + qy*qy;
-      const r  = Cr + PAD;
-      if (d2 >= r*r) return null;
-      const d = Math.max(1e-6, Math.sqrt(d2));
-      const ux = qx / d, uy = qy / d;
-      const pen = r - d;
-      return { x: -ux * pen, y: -uy * pen };
-    }
-    function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
-    function ensureWrap(el){
-      let txt = el.querySelector('.ttxt');
-      if (!txt){
-        const span = document.createElement('span');
-        span.className = 'ttxt';
-        span.textContent = el.textContent;
-        el.textContent = '';
-        el.appendChild(span);
-        txt = span;
+  function scoreDensity(items){
+    const R = 70;
+    for (let i=0;i<items.length;i++){
+      let c=0;
+      for (let j=0;j<items.length;j++){
+        if (i===j) continue;
+        const dx = items[i].pt.x - items[j].pt.x;
+        const dy = items[i].pt.y - items[j].pt.y;
+        if (dx*dx + dy*dy <= R*R) c++;
       }
-      return txt;
+      items[i].density = c;
     }
+  }
 
-    function collect(rect){
-      const items=[];
-      map.eachLayer(lyr=>{
-        if (!(lyr instanceof L.CircleMarker)) return;
-        const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
-        if (!tt) return;
-        if (!tt._container) tt.update();
-        const el = tt._container;
-        if (!el || !el.classList.contains('iata-tt')) return;
+  function rectFrom(it, dx, dy){
+    return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
+  }
 
-        const cls = Array.from(el.classList);
-        const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
-        const txt = ensureWrap(el);
-        txt.style.transform = 'translate(0px,0px)'; // reset to measure
-        const baseRect = rect(txt);
-        const latlng = lyr.getLatLng();
-        const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
-        const pt = map.latLngToContainerPoint(latlng);
-        items.push({ el, txt, size, baseRect, latlng, radius, pt, dx:0, dy:0, density:0 });
-      });
-      return items;
-    }
+  function solve(){
+    const rect = rectBase();
+    let items = collect(rect);
+    if (!items.length) return;
 
-    function scoreDensity(items){
-      const R = 70;
+    const z = map.getZoom();
+    const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
+    let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
+    if (maxZ == null) maxZ = 19;
+    const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
+
+    items.forEach(it=>{
+      const baseGate = (SHOWZ[it.size] || 7);
+      const extGate  = Math.max(minZ, baseGate - span);
+      it.__baseGate = baseGate; it.__extGate = extGate;
+      if (z < extGate) it.el.style.display = 'none';
+      else it.el.style.display = 'block';
+      it.txt.style.opacity = '1';
+      it.dx = 0; it.dy = 0;
+    });
+
+    items = items.filter(it => it.el.style.display !== 'none');
+    if (!items.length) return;
+
+    scoreDensity(items);
+    items.sort((a,b)=>{
+      const d = b.density - a.density; if (d) return d;
+      const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
+      return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
+    });
+
+    const W = map.getSize().x, H = map.getSize().y;
+    const boundsMargin = 2;
+
+    for (let t=0; t<ITERS; t++){
+      const rects = items.map(it => rectFrom(it, it.dx, it.dy));
+      const fx = new Array(items.length).fill(0);
+      const fy = new Array(items.length).fill(0);
+
+      // label-label pushes (split MTV)
       for (let i=0;i<items.length;i++){
-        let c=0;
-        for (let j=0;j<items.length;j++){
-          if (i===j) continue;
-          const dx = items[i].pt.x - items[j].pt.x;
-          const dy = items[i].pt.y - items[j].pt.y;
-          if (dx*dx + dy*dy <= R*R) c++;
-        }
-        items[i].density = c;
-      }
-    }
-
-    function rectFrom(it, dx, dy){
-      return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
-    }
-
-    function solve(){
-      const rect = rectBase();
-      let items = collect(rect);
-      if (!items.length) return;
-
-      const z = map.getZoom();
-      const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
-      let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
-      if (maxZ == null) maxZ = 19;
-      const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
-
-      items.forEach(it=>{
-        const baseGate = (SHOWZ[it.size] || 7);
-        const extGate  = Math.max(minZ, baseGate - span);
-        it.__baseGate = baseGate; it.__extGate = extGate;
-        if (z < extGate) it.el.style.display = 'none';
-        else it.el.style.display = 'block';
-        it.txt.style.opacity = '1';
-        it.dx = 0; it.dy = 0;
-      });
-
-      items = items.filter(it => it.el.style.display !== 'none');
-      if (!items.length) return;
-
-      scoreDensity(items);
-      items.sort((a,b)=>{
-        const d = b.density - a.density; if (d) return d;
-        const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
-        return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
-      });
-
-      const W = map.getSize().x, H = map.getSize().y;
-      const boundsMargin = 2;
-
-      for (let t=0; t<ITERS; t++){
-        const rects = items.map(it => rectFrom(it, it.dx, it.dy));
-        const fx = new Array(items.length).fill(0);
-        const fy = new Array(items.length).fill(0);
-
-        // label-label pushes (split MTV)
-        for (let i=0;i<items.length;i++){
-          for (let j=i+1;j<items.length;j++){
-            const v = mtv(rects[i], rects[j]);
-            if (!v) continue;
-            fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
-            fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
-          }
-        }
-
-        // label-dot (circle) separation + spring + edges
-        for (let i=0;i<items.length;i++){
-          const it = items[i];
-          const R  = rects[i];
-          const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
-          if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
-
-          // spring to anchor (keep near dot)
-          fx[i] += -0.05 * it.dx;
-          fy[i] += -0.05 * it.dy;
-
-          // keep inside view
-          if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
-          if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
-          if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
-          if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
-        }
-
-        // integrate + clamp drift radius
-        for (let i=0;i<items.length;i++){
-          items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
-          items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
+        for (let j=i+1;j<items.length;j++){
+          const v = mtv(rects[i], rects[j]);
+          if (!v) continue;
+          fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
+          fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
         }
       }
 
-      const finals = items.map(it => rectFrom(it, it.dx, it.dy));
+      // label-dot (circle) separation + spring + edges
       for (let i=0;i<items.length;i++){
         const it = items[i];
-        const R  = finals[i];
-        let collides = false;
-        for (let j=0;j<items.length;j++){
-          if (i===j) continue;
-          if (overlaps(R, finals[j], PAD)) { collides = true; break; }
-        }
-        const inExt = (z < it.__baseGate) && (z >= it.__extGate);
-        if (collides && inExt){
-          it.el.style.display = 'none';
-        }else{
-          it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
-          if (collides) it.txt.style.opacity = "0.9";
-        }
+        const R  = rects[i];
+        const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
+        if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
+
+        // spring to anchor (keep near dot)
+        fx[i] += -0.05 * it.dx;
+        fy[i] += -0.05 * it.dy;
+
+        // keep inside view
+        if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
+        if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
+        if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
+        if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
+      }
+
+      // integrate + clamp drift radius
+      for (let i=0;i<items.length;i++){
+        items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
+        items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
       }
     }
 
-    // schedule
-    let raf1=0, raf2=0;
-    function schedule(){
-      if (raf1) cancelAnimationFrame(raf1);
-      if (raf2) cancelAnimationFrame(raf2);
-      raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
-    }
-    map.whenReady(function(){ setTimeout(schedule, 400); });
-    map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
-
-    const pane = map.getPanes().tooltipPane;
-    if (pane && 'MutationObserver' in window){
-      const mo = new MutationObserver(schedule);
-      mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
+    const finals = items.map(it => rectFrom(it, it.dx, it.dy));
+    for (let i=0;i<items.length;i++){
+      const it = items[i];
+      const R  = finals[i];
+      let collides = false;
+      for (let j=0;j<items.length;j++){
+        if (i===j) continue;
+        if (overlaps(R, finals[j], PAD)) { collides = true; break; }
+      }
+      const inExt = (z < it.__baseGate) && (z >= it.__extGate);
+      if (collides && inExt){
+        it.el.style.display = 'none';
+      }else{
+        it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
+        if (collides) it.txt.style.opacity = "0.9";
+      }
     }
   }
-})();
-</script>
+
+  // schedule
+  let raf1=0, raf2=0;
+  function schedule(){
+    if (raf1) cancelAnimationFrame(raf1);
+    if (raf2) cancelAnimationFrame(raf2);
+    raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
+  }
+  map.whenReady(function(){ setTimeout(schedule, 400); });
+  map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
+
+  const pane = map.getPanes().tooltipPane;
+  if (pane && 'MutationObserver' in window){
+    const mo = new MutationObserver(schedule);
+    mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
+  }
+}
 """
 
     # Substitute tokens (no ${...} conflicts) and put JS in the script bucket
