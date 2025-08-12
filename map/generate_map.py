@@ -227,7 +227,7 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS (built with string.Template; no f-string braces; no .replace chaining) ---
+    # --- JS (string.Template; no .replace chaining) ---
     js_template = Template(
         r"""
 <script>
