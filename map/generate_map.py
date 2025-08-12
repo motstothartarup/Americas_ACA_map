@@ -33,8 +33,8 @@ SHOW_AT = dict(large=2, medium=3, small=4)
 PAD_PX = 2
 
 # NEW: max drift (“few millimeters”) and step between candidates
-DRIFT_PX = 24   # ≈ 6–7 mm at ~96 dpi
-STEP_PX  = 8
+DRIFT_PX = 30   # ≈ 6–7 mm at ~96 dpi
+STEP_PX  = 4
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -232,15 +232,15 @@ def build_map() -> folium.Map:
     js = r"""
 <script>
 (function(){
-  const map = __MAP__;
-  const SHOWZ = __SHOWZ__;
-  const PAD   = __PAD__;
-  const PRIOR = {large:0, medium:1, small:2};
-  const STEP  = __STEP__;       // candidate spacing (px)
-  const DRIFT = __DRIFT__;      // max movement from default (px)
-  const EXTFRAC = __EXTFRAC__;
+  const map    = __MAP__;
+  const SHOWZ  = __SHOWZ__;
+  const PAD    = __PAD__;
+  const PRIOR  = {large:0, medium:1, small:2};
+  const STEP   = __STEP__;     // candidate spacing (px)
+  const DRIFT  = __DRIFT__;    // max movement from default (px)
+  const EXTFRAC= __EXTFRAC__;
 
-  // Basic rect helpers in container coords
+  // ---------- small helpers ----------
   function getContainer(){ return map.getContainer(); }
   function rectBase(){
     const crect = getContainer().getBoundingClientRect();
@@ -252,8 +252,9 @@ def build_map() -> folium.Map:
   function overlaps(a,b,p){
     return !(a.x > b.x + b.w + p || b.x > a.x + a.w + p || a.y > b.y + b.h + p || b.y > a.y + a.h + p);
   }
-
-  // Collect labels by walking layers so we know dot center & radius
+  function inside(R, W, H, m=2){
+    return R.x >= m && R.y >= m && (R.x + R.w) <= (W - m) && (R.y + R.h) <= (H - m);
+  }
   function ensureWrap(el){
     let txt = el.querySelector('.ttxt');
     if (!txt){
@@ -267,6 +268,7 @@ def build_map() -> folium.Map:
     return txt;
   }
 
+  // Collect labels **with dot info**
   function collect(){
     const items=[];
     map.eachLayer(lyr=>{
@@ -287,121 +289,108 @@ def build_map() -> folium.Map:
     return items;
   }
 
-  // Try multiple candidate offsets (dx,dy) around the dot; prefer top, then diagonals, sides, etc.
-  function candidateOffsets(){
-    const list = [{dx:0, dy:0}];
-    for (let r=STEP; r<=DRIFT; r+=STEP){
-      // order: top, top-right, top-left, right, left, bottom-right, bottom-left, bottom
-      list.push(
-        {dx:0,  dy:-r},
-        {dx:+r, dy:-r},
-        {dx:-r, dy:-r},
-        {dx:+r, dy:0 },
-        {dx:-r, dy:0 },
-        {dx:+r, dy:+r},
-        {dx:-r, dy:+r},
-        {dx:0,  dy:+r},
-      );
+  // Density score (place crowded points first)
+  function addDensityScores(items){
+    const pts = items.map(it => map.latLngToContainerPoint(it.latlng));
+    const R = 60; // px radius for crowd check
+    for (let i=0;i<items.length;i++){
+      let c = 0;
+      for (let j=0;j<items.length;j++){
+        if (i===j) continue;
+        const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+        if (dx*dx + dy*dy <= R*R) c++;
+      }
+      items[i].density = c;
+      items[i].pt = pts[i];
     }
-    return list;
   }
 
-  // For a given text element, produce a function that returns its rect if we applied (dx,dy)
-  function rectWithDxyFactory(txtEl){
-    const base = txtEl.style.transform || '';
-    const rect = rectBase();
-    return function(dx,dy){
-      txtEl.style.transform = `translate(${dx}px, ${dy}px)`;
-      const R = rect(txtEl);
-      txtEl.style.transform = base;
-      return R;
-    };
+  // Spiral of candidate offsets around (0,0), many directions per ring
+  function spiralOffsets(){
+    const out = [{dx:0, dy:0}];
+    for (let r=STEP; r<=DRIFT; r+=STEP){
+      const N = Math.max(8, Math.round(2*Math.PI*r/STEP)); // more angles for larger radii
+      for (let k=0;k<N;k++){
+        const a = (2*Math.PI*k)/N;
+        out.push({ dx: Math.round(r*Math.cos(a)), dy: Math.round(r*Math.sin(a)) });
+      }
+    }
+    // prefer top-ish positions first
+    out.sort((a,b)=> (Math.atan2(a.dy, a.dx) - Math.PI/2) - (Math.atan2(b.dy, b.dx) - Math.PI/2));
+    return out;
+  }
+  const OFFSETS = spiralOffsets();
+
+  // Try to place one label using OFFSETS, avoiding dot + kept + map edges
+  function tryPlaceOne(it, kept, rect){
+    const W = map.getSize().x, H = map.getSize().y;
+    const dotPad = 2;
+    const dotBB = { x: it.pt.x - it.radius - dotPad, y: it.pt.y - it.radius - dotPad,
+                    w: 2*(it.radius + dotPad),        h: 2*(it.radius + dotPad) };
+    const base = it.txt.style.transform || '';
+    for (const c of OFFSETS){
+      it.txt.style.transform = `translate(${c.dx}px, ${c.dy}px)`;
+      const R = rect(it.txt);
+      if (!inside(R, W, H, 1)) continue;
+      if (overlaps(R, dotBB, PAD)) continue;
+      let bad = false;
+      for (const K of kept){ if (overlaps(R, K, PAD)) { bad = true; break; } }
+      if (!bad) return {ok:true, rect:R, dx:c.dx, dy:c.dy};
+    }
+    it.txt.style.transform = base;
+    return {ok:false};
   }
 
-  function solve(){
-    const items = collect();
-    if (!items.length) return;
-
+  function solveOnce(){
+    const items = collect(); if (!items.length) return;
     const z = map.getZoom();
     const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
     let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
     if (maxZ == null) maxZ = 19;
     const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
 
-    // Gate by zoom + reset transforms
+    // gate + reset
     items.forEach(it=>{
       const baseGate = (SHOWZ[it.size] || 7);
       const extGate  = Math.max(minZ, baseGate - span);
-      it.__baseGate = baseGate;
-      it.__extGate  = extGate;
-
-      if (z < extGate){
-        it.el.style.display = 'none';
-      } else {
-        it.el.style.display = 'block';
-        it.txt.style.transform = 'translate(0px,0px)';
-        it.txt.style.opacity = '1';
-      }
+      it.__baseGate = baseGate; it.__extGate = extGate;
+      if (z < extGate){ it.el.style.display = 'none'; }
+      else { it.el.style.display = 'block'; it.txt.style.transform = 'translate(0px,0px)'; it.txt.style.opacity='1'; }
     });
 
     const cand = items.filter(it => it.el.style.display !== 'none');
     if (!cand.length) return;
 
+    addDensityScores(cand);
     const rect = rectBase();
     const kept = [];
 
-    // Sort: priority (large>medium>small), then y, then x
+    // place crowded + high-priority first
     cand.sort((a,b)=>{
-      const pr = (a.size==='large'?0:a.size==='medium'?1:2) - (b.size==='large'?0:b.size==='medium'?1:2);
-      if (pr !== 0) return pr;
-      const ra = rect(a.txt), rb = rect(b.txt);
-      return (ra.y - rb.y) || (ra.x - rb.x);
+      const d = b.density - a.density; if (d) return d;
+      const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
+      return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
     });
 
-    const offsets = candidateOffsets();
-
     for (const it of cand){
-      const rectFor = rectWithDxyFactory(it.txt);
-
-      // Dot bounding box (avoid labels covering the dot)
-      const pt = map.latLngToContainerPoint(it.latlng);
-      const dotPad = 2;
-      const dotBB = { x: pt.x - it.radius - dotPad, y: pt.y - it.radius - dotPad,
-                      w: 2*(it.radius + dotPad),     h: 2*(it.radius + dotPad) };
-
-      let placed = false;
-      for (const c of offsets){
-        const R = rectFor(c.dx, c.dy);
-
-        // Must not overlap dot, and must not overlap kept labels
-        let bad = overlaps(R, dotBB, PAD);
-        if (!bad){
-          for (const K of kept){ if (overlaps(R, K, PAD)) { bad = true; break; } }
-        }
-        if (!bad){
-          it.txt.style.transform = `translate(${c.dx}px, ${c.dy}px)`;
-          kept.push(R);
-          placed = true;
-          break;
-        }
-      }
-
-      // If we couldn't place within allowed drift:
-      const inExtension = (z < it.__baseGate) && (z >= it.__extGate);
-      if (!placed){
-        if (inExtension){
-          it.el.style.display = 'none';
-        }else{
-          // keep close-by, slightly dim, even if overlapping (user preference: keep labels if possible)
-          it.txt.style.transform = 'translate(0px,0px)';
-          it.txt.style.opacity = '0.9';
-          kept.push(rect(it.txt));
-        }
+      const placed = tryPlaceOne(it, kept, rect);
+      const inExt  = (z < it.__baseGate) && (z >= it.__extGate);
+      if (placed.ok){
+        it.txt.style.transform = `translate(${placed.dx}px, ${placed.dy}px)`;
+        kept.push(placed.rect);
+      }else{
+        if (inExt){ it.el.style.display = 'none'; }
+        else { it.txt.style.opacity = '0.9'; kept.push(rect(it.txt)); } // keep, slightly dim
       }
     }
   }
 
-  // Schedule solver after layout + on interactions
+  // Two short improvement passes to relax late collisions
+  function solve(){
+    solveOnce();
+    requestAnimationFrame(()=> solveOnce());
+  }
+
   let raf1=0, raf2=0;
   function schedule(){ if (raf1) cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2);
     raf1 = requestAnimationFrame(()=>{ raf2 = requestAnimationFrame(solve); }); }
@@ -416,6 +405,7 @@ def build_map() -> folium.Map:
   }
 })();
 </script>
+
 """
 
     # Substitute tokens (won’t touch any ${dx} in the JS)
