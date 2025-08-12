@@ -33,11 +33,11 @@ SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at run
 PAD_PX = 2
 
 # Placement solver knobs
-DRIFT_PX = 28     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
+DRIFT_PX = 12     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
 ITERS    = 24     # relaxation iterations
 FSTEP    = 0.55   # solver step (0.45–0.65 good)
 
-EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
+EXT_FRACTION = 0.1  # ~20% of zoom range for “extended keep”
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
