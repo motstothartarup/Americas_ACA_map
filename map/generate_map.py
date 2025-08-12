@@ -365,7 +365,7 @@ def build_map() -> folium.Map:
 """
     )
 
-    js = js_template.substitute(
+    js = js_template.safe_substitute(
         MAP=m.get_name(),
         SHOWZ=json.dumps(SHOW_AT),
         PAD=int(PAD_PX),
