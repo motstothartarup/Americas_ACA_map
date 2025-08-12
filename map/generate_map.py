@@ -32,7 +32,7 @@ LABEL_GAP_PX = 10
 SHOW_AT = dict(large=2, medium=3, small=4)
 PAD_PX = 2
 
-# Screen-space clustering radius (px) at current zoom
+# Screen-space clustering radius (px) to consider labels in one stack
 STACK_CLUSTER_RADIUS_PX = 30
 EXT_FRACTION = 0.20
 
@@ -162,7 +162,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "stacker-r1.2"
+    SOLVER_VER = "stacker-r1.4"
 
     # --- CSS + footer badge ---
     badge_html = r"""
@@ -240,28 +240,30 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: cluster-and-stack labeler with robust boot ---
+    # --- JS: cluster-and-stack labeler (hardened boot) ---
     js = r"""
-// ===== ACA stacker bootstrap (r1.2) =====
+// ===== ACA stacker bootstrap (r1.4) =====
 (function(){
-  const SHOWZ   = __SHOWZ__;
-  const PAD     = __PAD__;
-  const EXTFRAC = __EXTFRAC__;
+  if (window.__ACA_STACKER__) return;        // idempotent
+  window.__ACA_STACKER__ = true;
+
+  const SHOWZ     = __SHOWZ__;
+  const PAD       = __PAD__;
+  const EXTFRAC   = __EXTFRAC__;
   const CLUSTER_R = __CLUSTERR__;   // px
 
-  // Try direct reference first; if unavailable, scan globals for any Leaflet map
+  // resolve Leaflet map: direct var, or scan window for map_*
   function resolveMap(){
     try { return __MAP__; } catch(e) {}
     for (const k in window){
       if (!Object.prototype.hasOwnProperty.call(window,k)) continue;
-      if (/^map_/.test(k) && window[k] && window[k].getContainer && window[k].getPanes){
-        return window[k];
-      }
+      const v = window[k];
+      if (/^map_/.test(k) && v && v.getContainer && v.getPanes) return v;
     }
     return null;
   }
 
-  function until(cond, cb, tries=120, delay=100){
+  function until(cond, cb, tries=240, delay=100){
     (function tick(n){
       if (cond()) return cb();
       if (n<=0) return;
@@ -273,7 +275,7 @@ def build_map() -> folium.Map:
     const map = resolveMap();
     if (!map) return; // keep waiting
 
-    // once-only dashed outline so you *see* the script is active
+    // once-only dashed outline so you can *see* the script is active
     const styleTag = document.createElement("style");
     styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
     document.head.appendChild(styleTag);
@@ -282,8 +284,10 @@ def build_map() -> folium.Map:
     const pane = map.getPanes && map.getPanes().tooltipPane;
     if (!pane) return;
 
+    const mapEl = map.getContainer();
+
     function rectBase(){
-      const crect = map.getContainer().getBoundingClientRect();
+      const crect = mapEl.getBoundingClientRect();
       return function rect(el){
         const r = el.getBoundingClientRect();
         return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
@@ -308,18 +312,19 @@ def build_map() -> folium.Map:
     function bboxFromPoints(pts){
       let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
       for (const p of pts){ if (p.x<minx) minx=p.x; if (p.y<miny) miny=p.y; if (p.x>maxx) maxx=p.x; if (p.y>maxy) maxy=p.y; }
-      return {x:minx, y:miny, w:(maxx-minx), h:(maxy-miny)};
+      return {x:minx, y=miny, w:(maxx-minx), h:(maxy-miny)};
     }
 
+    // collect all layers that have tooltips and latlngs (robust across Folium versions)
     function collect(rect){
       const items=[];
       map.eachLayer(lyr=>{
-        if (!(lyr instanceof L.CircleMarker)) return;
-        const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
+        if (!lyr || typeof lyr.getTooltip!=='function' || typeof lyr.getLatLng!=='function') return;
+        const tt = lyr.getTooltip();
         if (!tt) return;
         if (!tt._container) tt.update();
         const el = tt._container;
-        if (!el || !el.classList.contains('iata-tt')) return;
+        if (!el || !el.classList || !el.classList.contains('iata-tt')) return;
 
         const txt = ensureWrap(el);
         txt.style.transform = 'translate(0px,0px)'; // reset
@@ -327,7 +332,8 @@ def build_map() -> folium.Map:
         const latlng = lyr.getLatLng();
         const pt = map.latLngToContainerPoint(latlng);
 
-        const cls = Array.from(el.classList);
+        // size class (for SHOWZ gate)
+        const cls = Array.from(el.classList || []);
         const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
 
         items.push({ lyr, el, txt, baseRect, latlng, pt, size, visible:true });
@@ -400,9 +406,11 @@ def build_map() -> folium.Map:
     function layout(){
       clearStacks();
       const rect = rectBase();
+
       let items = collect(rect);
       if (!items.length) return;
 
+      // zoom gate then prepare DOM state
       gateByZoom(items);
       items.forEach(it=>{
         it.el.style.display = it.visible ? 'block' : 'none';
@@ -410,10 +418,12 @@ def build_map() -> folium.Map:
         it.txt.style.opacity = '1';
       });
 
+      // only visible items participate
       const vis = items.map((it,idx)=>({it,idx})).filter(x=>x.it.visible);
       if (!vis.length) return;
       vis.forEach(x=>{ x.it.baseRect = rect(x.it.txt); });
 
+      // cluster by (1) label overlap OR (2) dot proximity within CLUSTER_R
       const uf = new UF(vis.length);
       for (let a=0; a<vis.length; a++){
         for (let b=a+1; b<vis.length; b++){
@@ -425,6 +435,7 @@ def build_map() -> folium.Map:
       }
       const comps = uf.groups(vis.length);
 
+      // render stacks (size>=2), keep singletons
       for (const comp of comps){
         if (comp.length >= 2){
           const idxs = comp.map(i => vis[i].idx);
@@ -438,11 +449,19 @@ def build_map() -> folium.Map:
       }
     }
 
-    // schedule on multiple signals to be extra safe on static hosts/CDNs
+    // run layout after we *actually* have tooltip DOM elements
+    function hasTooltips(){
+      return !!(pane && pane.querySelector('.iata-tt'));
+    }
+
+    // schedule on many signals to outsmart static hosting
     let raf=0;
     function schedule(){ if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(layout); }
 
-    map.whenReady(function(){ setTimeout(schedule, 200); });
+    // First run once tooltips appear
+    until(()=>hasTooltips(), ()=>{ schedule(); }, 200, 50);
+
+    map.whenReady(()=> setTimeout(schedule, 250));
     map.on('zoomend moveend overlayadd overlayremove layeradd layerremove tileload resize', schedule);
 
     if (pane && 'MutationObserver' in window){
@@ -450,13 +469,12 @@ def build_map() -> folium.Map:
       mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
     }
 
-    // also schedule once window load fires (covers GH Pages hydration edge cases)
-    if (document.readyState === 'complete') setTimeout(schedule, 100);
-    else window.addEventListener('load', ()=> setTimeout(schedule, 100), { once:true });
+    if (document.readyState === 'complete') setTimeout(schedule, 150);
+    else window.addEventListener('load', ()=> setTimeout(schedule, 150), { once:true });
   }
 
-  // Keep trying until both Leaflet and the map exist
-  until(()=> !!resolveMap() && !!resolveMap().getPanes && !!resolveMap().getContainer, init, 200, 100);
+  // Keep trying until the map is resolvable
+  until(()=> !!resolveMap(), init, 240, 100);
 })();
 """
 
@@ -468,7 +486,9 @@ def build_map() -> folium.Map:
           .replace("__CLUSTERR__", str(int(STACK_CLUSTER_RADIUS_PX)))
     )
 
+    # Inject via Folium's script bucket (works on GH Pages)
     m.get_root().script.add_child(folium.Element(js))
+
     return m
 
 
