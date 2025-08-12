@@ -165,8 +165,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    m.get_root().html.add_child(
-        folium.Element(
+    m.get_root().script.add_child(folium.Element(js))
             f"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
@@ -235,6 +234,7 @@ def build_map() -> folium.Map:
 <script>
 (function(){
   const map = __MAP__;
+  console.debug("ACA label solver loaded (r3), map =", __MAP__);
   const SHOWZ = __SHOWZ__;
   const PAD   = __PAD__;
   const PRIOR = {large:0, medium:1, small:2};
