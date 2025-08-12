@@ -33,11 +33,11 @@ SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at run
 PAD_PX = 2
 
 # Placement solver knobs
-DRIFT_PX = 12     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
+DRIFT_PX = 28     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
 ITERS    = 24     # relaxation iterations
 FSTEP    = 0.55   # solver step (0.45–0.65 good)
 
-EXT_FRACTION = 0.1  # ~20% of zoom range for “extended keep”
+EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -47,20 +47,20 @@ OUT_FILE = os.path.join(OUT_DIR, "index.html")
 def write_error_page(msg: str) -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    html = f"""<!doctype html><meta charset="utf-8">
+    html = """<!doctype html><meta charset="utf-8">
 <title>ACA Americas map</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
 <meta http-equiv="Expires" content="0"/>
-<style>body{{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:24px;color:#233;max-width:900px;margin:auto;background:#f6f8fb}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);padding:20px}}
-h1{{margin:0 0 10px 0}}code{{background:#f5f7fb;padding:2px 6px;border-radius:6px}}</style>
+<style>body{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:24px;color:#233;max-width:900px;margin:auto;background:#f6f8fb}
+.card{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);padding:20px}
+h1{margin:0 0 10px 0}code{background:#f5f7fb;padding:2px 6px;border-radius:6px}</style>
 <div class="card">
   <h1>ACA Americas map</h1>
   <p><strong>Status:</strong> temporarily unavailable.</p>
-  <p><strong>Reason:</strong> {msg}</p>
-  <p>Last attempt: {updated}. This page updates automatically once per day.</p>
-</div>"""
+  <p><strong>Reason:</strong> __MSG__</p>
+  <p>Last attempt: __UPDATED__. This page updates automatically once per day.</p>
+</div>""".replace("__MSG__", msg).replace("__UPDATED__", updated)
     with open(OUT_FILE, "w", encoding="utf-8") as f:
         f.write(html)
     print("Wrote fallback page:", OUT_FILE)
@@ -165,37 +165,40 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    m.get_root().script.add_child(folium.Element(js))
-            f"""
+    SOLVER_VER = "solver-r3.2"
+
+    # --- CSS + footer badge (no f-strings; tokens replaced) ---
+    badge_html = r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
 <meta http-equiv="Expires" content="0"/>
 <style>
-.leaflet-tooltip.iata-tt{{
+.leaflet-tooltip.iata-tt{
   background: transparent; border: 0; box-shadow: none;
   color: #6e6e6e;
   font-family: "Open Sans","Helvetica Neue",Arial,sans-serif;
   font-weight: 1000; font-size: 12px; letter-spacing: 0.5px;
   text-transform: uppercase; white-space: nowrap;
-}}
+}
 .leaflet-tooltip-top:before,
 .leaflet-tooltip-bottom:before,
 .leaflet-tooltip-left:before,
-.leaflet-tooltip-right:before{{ display:none !important; }}
-.leaflet-tooltip.iata-tt .ttxt{{ display:inline-block; transform:translate(0px,0px); will-change:transform; }}
-.leaflet-control-layers-expanded{{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }}
-.last-updated {{
+.leaflet-tooltip-right:before{ display:none !important; }
+.leaflet-tooltip.iata-tt .ttxt{ display:inline-block; transform:translate(0px,0px); will-change:transform; }
+.leaflet-control-layers-expanded{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }
+.last-updated {
   position:absolute; right:12px; bottom:12px; z-index:9999;
   background:#fff; padding:6px 8px; border-radius:8px;
   box-shadow:0 2px 8px rgba(0,0,0,.12);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
-}}
+}
 </style>
-<div class="last-updated">Last updated: {updated}</div>
+<div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
 """
-        )
-    )
+    badge_html = badge_html.replace("__UPDATED__", updated).replace("__VER__", SOLVER_VER)
+    m.get_root().html.add_child(folium.Element(badge_html))
 
+    # dots + permanent tooltips
     for _, r in amer.iterrows():
         lat, lon = float(r.latitude_deg), float(r.longitude_deg)
         size = r.size
@@ -211,7 +214,9 @@ def build_map() -> folium.Map:
             fill_color=PALETTE.get(r.aca_level, "#666"),
             fill_opacity=0.95,
             popup=folium.Popup(
-                f"<b>{r.airport}</b><br>IATA: {r.iata}<br>ACA: <b>{r.aca_level}</b><br>Country: {r.country}",
+                "<b>{airport}</b><br>IATA: {iata}<br>ACA: <b>{lvl}</b><br>Country: {ctry}".format(
+                    airport=r.airport, iata=r.iata, lvl=r.aca_level, ctry=r.country
+                ),
                 max_width=320,
             ),
         )
@@ -222,7 +227,7 @@ def build_map() -> folium.Map:
                 direction="top",
                 offset=(0, offset_y),
                 sticky=False,
-                class_name=f"iata-tt size-{size} tt-{r.iata}",
+                class_name="iata-tt size-{size} tt-{iata}".format(size=size, iata=r.iata),
             )
         )
         dot.add_to(groups[r.aca_level])
@@ -234,7 +239,6 @@ def build_map() -> folium.Map:
 <script>
 (function(){
   const map = __MAP__;
-  console.debug("ACA label solver loaded (r3), map =", __MAP__);
   const SHOWZ = __SHOWZ__;
   const PAD   = __PAD__;
   const PRIOR = {large:0, medium:1, small:2};
@@ -242,6 +246,8 @@ def build_map() -> folium.Map:
   const EXTFRAC = __EXTFRAC__;
   const ITERS = __ITERS__;
   const FSTEP = __FSTEP__;
+
+  console.debug("ACA label solver loaded (r3.2), map =", __MAP__);
 
   function getContainer(){ return map.getContainer(); }
   function rectBase(){
@@ -255,7 +261,7 @@ def build_map() -> folium.Map:
   function overlaps(A,B,p){
     return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
   }
-  function mtv(A,B){ // minimal translation vector between rects
+  function mtv(A,B){
     const ac = center(A), bc = center(B);
     const dx = bc.x - ac.x, dy = bc.y - ac.y;
     const px = (A.w/2 + B.w/2) - Math.abs(dx);
@@ -274,7 +280,7 @@ def build_map() -> folium.Map:
     const d = Math.max(1e-6, Math.sqrt(d2));
     const ux = qx / d, uy = qy / d;
     const pen = r - d;
-    return { x: -ux * pen, y: -uy * pen }; // move away from circle
+    return { x: -ux * pen, y: -uy * pen };
   }
   function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
   function ensureWrap(el){
@@ -303,7 +309,7 @@ def build_map() -> folium.Map:
       const cls = Array.from(el.classList);
       const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
       const txt = ensureWrap(el);
-      txt.style.transform = 'translate(0px,0px)'; // reset for measurement
+      txt.style.transform = 'translate(0px,0px)'; // reset to measure
       const baseRect = rect(txt);
       const latlng = lyr.getLatLng();
       const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
@@ -397,8 +403,8 @@ def build_map() -> folium.Map:
       }
 
       for (let i=0;i<items.length;i++){
-        items[i].dx = Math.max(-DRIFT, Math.min(DRIFT, items[i].dx + FSTEP*fx[i]));
-        items[i].dy = Math.max(-DRIFT, Math.min(DRIFT, items[i].dy + FSTEP*fy[i]));
+        items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
+        items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
       }
     }
 
@@ -439,7 +445,7 @@ def build_map() -> folium.Map:
 </script>
 """
 
-    # Substitute tokens (no ${...} conflicts)
+    # Substitute tokens (no ${...} conflicts) and put JS in the script bucket
     js = js.replace("__MAP__", m.get_name())
     js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
     js = js.replace("__PAD__",  str(int(PAD_PX)))
@@ -448,7 +454,7 @@ def build_map() -> folium.Map:
     js = js.replace("__ITERS__",  str(int(ITERS)))
     js = js.replace("__FSTEP__",  str(FSTEP))
 
-    m.get_root().html.add_child(folium.Element(js))
+    m.get_root().script.add_child(folium.Element(js))
     return m
 
 
