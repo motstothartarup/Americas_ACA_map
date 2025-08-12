@@ -1,5 +1,5 @@
 # map/generate_map.py
-# Builds docs/index.html with the ACA Americas map (labels only, L/R nudging, ~20% extended keep).
+# Builds docs/index.html with the ACA Americas map (labels only, smart placement near dots).
 # If data fetch fails, writes a fallback page so Pages still serves something.
 
 import io
@@ -31,12 +31,14 @@ STROKE = 2
 LABEL_GAP_PX = 10
 SHOW_AT = dict(large=2, medium=3, small=4)
 PAD_PX = 2
-SHIFT_PX = 14
-MAX_STEPS = 10
-EXT_FRACTION = 0.20  # ~20% of zoom range
+
+# NEW: max drift (“few millimeters”) and step between candidates
+DRIFT_PX = 24   # ≈ 6–7 mm at ~96 dpi
+STEP_PX  = 8
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
+EXT_FRACTION = 0.20  # ~20% zoom extension window
 
 
 # ---------- helpers ----------
@@ -179,7 +181,7 @@ def build_map() -> folium.Map:
 .leaflet-tooltip-bottom:before,
 .leaflet-tooltip-left:before,
 .leaflet-tooltip-right:before{{ display:none !important; }}
-.leaflet-tooltip.iata-tt .ttxt{{ display:inline-block; transform:translateX(0px); will-change:transform; }}
+.leaflet-tooltip.iata-tt .ttxt{{ display:inline-block; transform:translate(0px,0px); will-change:transform; }}
 .leaflet-control-layers-expanded{{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }}
 .last-updated {{
   position:absolute; right:12px; bottom:12px; z-index:9999;
@@ -226,7 +228,7 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS with custom placeholders to avoid ${dx} conflicts ---
+    # --- JS: smart placement near dot (cardinals + diagonals within DRIFT_PX) ---
     js = r"""
 <script>
 (function(){
@@ -234,12 +236,12 @@ def build_map() -> folium.Map:
   const SHOWZ = __SHOWZ__;
   const PAD   = __PAD__;
   const PRIOR = {large:0, medium:1, small:2};
-  const STEP  = __STEP__;
-  const STEPS = __STEPS__;
+  const STEP  = __STEP__;       // candidate spacing (px)
+  const DRIFT = __DRIFT__;      // max movement from default (px)
   const EXTFRAC = __EXTFRAC__;
 
+  // Basic rect helpers in container coords
   function getContainer(){ return map.getContainer(); }
-  function getTooltipPane(){ return map.getPanes().tooltipPane; }
   function rectBase(){
     const crect = getContainer().getBoundingClientRect();
     return function rect(el){
@@ -250,6 +252,8 @@ def build_map() -> folium.Map:
   function overlaps(a,b,p){
     return !(a.x > b.x + b.w + p || b.x > a.x + a.w + p || a.y > b.y + b.h + p || b.y > a.y + a.h + p);
   }
+
+  // Collect labels by walking layers so we know dot center & radius
   function ensureWrap(el){
     let txt = el.querySelector('.ttxt');
     if (!txt){
@@ -262,29 +266,61 @@ def build_map() -> folium.Map:
     }
     return txt;
   }
+
   function collect(){
-    const pane = getTooltipPane(); if (!pane) return [];
-    const nodes = pane.querySelectorAll('.leaflet-tooltip.iata-tt');
-    return Array.from(nodes).map(el => {
+    const items=[];
+    map.eachLayer(lyr=>{
+      if (!(lyr instanceof L.CircleMarker)) return;
+      const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
+      if (!tt) return;
+      if (!tt._container) tt.update();
+      const el = tt._container;
+      if (!el || !el.classList.contains('iata-tt')) return;
+
       const cls = Array.from(el.classList);
-      const size = (cls.find(c => c.startsWith('size-')) || 'size-small').slice(5);
+      const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
       const txt = ensureWrap(el);
-      return { el, txt, size };
+      const latlng = lyr.getLatLng();
+      const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
+      items.push({ el, txt, size, latlng, radius });
     });
+    return items;
   }
-  function tryPlace(rectForDx, kept, pad){
-    const candidates = [0];
-    for (let k=1;k<=STEPS;k++){ candidates.push(+k*STEP, -k*STEP); }
-    for (const dx of candidates){
-      const R = rectForDx(dx);
-      let collide = false;
-      for (const K of kept){ if (overlaps(R, K, pad)) { collide = true; break; } }
-      if (!collide) return {ok:true, dx, R};
+
+  // Try multiple candidate offsets (dx,dy) around the dot; prefer top, then diagonals, sides, etc.
+  function candidateOffsets(){
+    const list = [{dx:0, dy:0}];
+    for (let r=STEP; r<=DRIFT; r+=STEP){
+      // order: top, top-right, top-left, right, left, bottom-right, bottom-left, bottom
+      list.push(
+        {dx:0,  dy:-r},
+        {dx:+r, dy:-r},
+        {dx:-r, dy:-r},
+        {dx:+r, dy:0 },
+        {dx:-r, dy:0 },
+        {dx:+r, dy:+r},
+        {dx:-r, dy:+r},
+        {dx:0,  dy:+r},
+      );
     }
-    return {ok:false};
+    return list;
   }
-  function solveLabels(){
-    const items = collect(); if (!items.length) return;
+
+  // For a given text element, produce a function that returns its rect if we applied (dx,dy)
+  function rectWithDxyFactory(txtEl){
+    const base = txtEl.style.transform || '';
+    const rect = rectBase();
+    return function(dx,dy){
+      txtEl.style.transform = `translate(${dx}px, ${dy}px)`;
+      const R = rect(txtEl);
+      txtEl.style.transform = base;
+      return R;
+    };
+  }
+
+  function solve(){
+    const items = collect();
+    if (!items.length) return;
 
     const z = map.getZoom();
     const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
@@ -292,16 +328,18 @@ def build_map() -> folium.Map:
     if (maxZ == null) maxZ = 19;
     const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
 
-    items.forEach(it => {
+    // Gate by zoom + reset transforms
+    items.forEach(it=>{
       const baseGate = (SHOWZ[it.size] || 7);
       const extGate  = Math.max(minZ, baseGate - span);
-      it.__baseGate = baseGate; it.__extGate = extGate;
+      it.__baseGate = baseGate;
+      it.__extGate  = extGate;
 
       if (z < extGate){
         it.el.style.display = 'none';
       } else {
         it.el.style.display = 'block';
-        it.txt.style.transform = 'translateX(0px)';
+        it.txt.style.transform = 'translate(0px,0px)';
         it.txt.style.opacity = '1';
       }
     });
@@ -310,46 +348,64 @@ def build_map() -> folium.Map:
     if (!cand.length) return;
 
     const rect = rectBase();
-    const rectWithDx = (txtEl) => (dx) => {
-      const prev = txtEl.style.transform || '';
-      txtEl.style.transform = `translateX(${dx}px)`;
-      const R = rect(txtEl);
-      txtEl.style.transform = prev;
-      return R;
-    };
+    const kept = [];
 
+    // Sort: priority (large>medium>small), then y, then x
     cand.sort((a,b)=>{
-      const pr = PRIOR[a.size] - PRIOR[b.size];
+      const pr = (a.size==='large'?0:a.size==='medium'?1:2) - (b.size==='large'?0:b.size==='medium'?1:2);
       if (pr !== 0) return pr;
       const ra = rect(a.txt), rb = rect(b.txt);
-      if (ra.y !== rb.y) return ra.y - rb.y;
-      return ra.x - rb.x;
+      return (ra.y - rb.y) || (ra.x - rb.x);
     });
 
-    const kept = [];
+    const offsets = candidateOffsets();
+
     for (const it of cand){
-      const placed = tryPlace(rectWithDx(it.txt), kept, PAD);
+      const rectFor = rectWithDxyFactory(it.txt);
+
+      // Dot bounding box (avoid labels covering the dot)
+      const pt = map.latLngToContainerPoint(it.latlng);
+      const dotPad = 2;
+      const dotBB = { x: pt.x - it.radius - dotPad, y: pt.y - it.radius - dotPad,
+                      w: 2*(it.radius + dotPad),     h: 2*(it.radius + dotPad) };
+
+      let placed = false;
+      for (const c of offsets){
+        const R = rectFor(c.dx, c.dy);
+
+        // Must not overlap dot, and must not overlap kept labels
+        let bad = overlaps(R, dotBB, PAD);
+        if (!bad){
+          for (const K of kept){ if (overlaps(R, K, PAD)) { bad = true; break; } }
+        }
+        if (!bad){
+          it.txt.style.transform = `translate(${c.dx}px, ${c.dy}px)`;
+          kept.push(R);
+          placed = true;
+          break;
+        }
+      }
+
+      // If we couldn't place within allowed drift:
       const inExtension = (z < it.__baseGate) && (z >= it.__extGate);
-      if (placed.ok){
-        it.txt.style.transform = `translateX(${placed.dx}px)`;
-        kept.push(placed.R);
-      } else {
+      if (!placed){
         if (inExtension){
           it.el.style.display = 'none';
-        } else {
-          it.txt.style.transform = 'translateX(0px)';
+        }else{
+          // keep close-by, slightly dim, even if overlapping (user preference: keep labels if possible)
+          it.txt.style.transform = 'translate(0px,0px)';
           it.txt.style.opacity = '0.9';
+          kept.push(rect(it.txt));
         }
       }
     }
   }
 
+  // Schedule solver after layout + on interactions
   let raf1=0, raf2=0;
-  function schedule(){
-    if (raf1) cancelAnimationFrame(raf1);
-    if (raf2) cancelAnimationFrame(raf2);
-    raf1 = requestAnimationFrame(()=>{ raf2 = requestAnimationFrame(solveLabels); });
-  }
+  function schedule(){ if (raf1) cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2);
+    raf1 = requestAnimationFrame(()=>{ raf2 = requestAnimationFrame(solve); }); }
+
   map.whenReady(()=> setTimeout(schedule, 500));
   map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
 
@@ -362,12 +418,12 @@ def build_map() -> folium.Map:
 </script>
 """
 
-    # Substitute our unique tokens without touching ${dx} in the JS
+    # Substitute tokens (won’t touch any ${dx} in the JS)
     js = js.replace("__MAP__", m.get_name())
     js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
-    js = js.replace("__PAD__", str(int(PAD_PX)))
-    js = js.replace("__STEP__", str(int(SHIFT_PX)))
-    js = js.replace("__STEPS__", str(int(MAX_STEPS)))
+    js = js.replace("__PAD__",  str(int(PAD_PX)))
+    js = js.replace("__STEP__", str(int(STEP_PX)))
+    js = js.replace("__DRIFT__",str(int(DRIFT_PX)))
     js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
     m.get_root().html.add_child(folium.Element(js))
 
@@ -383,5 +439,5 @@ if __name__ == "__main__":
     except Exception as e:
         print("ERROR building map:", e, file=sys.stderr)
         write_error_page(str(e))
-        # Do not fail the workflow even if data fetch breaks; we still wrote a page.
+        # Keep Pages live even if fetch/parsing fails.
         sys.exit(0)
