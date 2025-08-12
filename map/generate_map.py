@@ -332,14 +332,14 @@ def build_map() -> folium.Map:
 })();
 </script>
 """
-    # Do replacements on separate lines to avoid indentation errors
-    js = js.replace("%MAP%", m.get_name())
-    js = js.replace("%SHOWZ%", json.dumps(SHOW_AT))
-    js = js.replace("%PAD%",  str(int(PAD_PX)))
-    js = js.replace("%STEP%", str(int(SHIFT_PX)))
-    js = js.replace("%STEPS%",str(int(MAX_STEPS)))
-    js = js.replace("%EXTFRAC%", str(EXT_FRACTION))
-    m.get_root().html.add_child(folium.Element(js))
+
+js = js.replace("%MAP%", m.get_name())
+js = js.replace("%SHOWZ%", json.dumps(SHOW_AT))
+js = js.replace("%PAD%",  str(int(PAD_PX)))
+js = js.replace("%STEP%", str(int(SHIFT_PX)))
+js = js.replace("%STEPS%",str(int(MAX_STEPS)))
+js = js.replace("%EXTFRAC%", str(EXT_FRACTION))
+m.get_root().html.add_child(folium.Element(js))
 
     return m
 
