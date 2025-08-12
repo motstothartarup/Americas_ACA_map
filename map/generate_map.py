@@ -33,8 +33,13 @@ SHOW_AT = dict(large=2, medium=3, small=4)
 PAD_PX = 2
 
 # NEW: max drift (“few millimeters”) and step between candidates
-DRIFT_PX = 30   # ≈ 6–7 mm at ~96 dpi
-STEP_PX  = 4
+DRIFT_PX = 28   # max distance a label may move from its dot (≈7–8 mm)
+STEP_PX  = 6    # keep (not used by solver now, but fine to leave)
+
+# NEW: solver tuning
+ITERS    = 24   # number of relaxation iterations
+FSTEP    = 0.55 # integration step for forces (0.45–0.65 is a good band)
+
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -232,15 +237,16 @@ def build_map() -> folium.Map:
     js = r"""
 <script>
 (function(){
-  const map    = __MAP__;
-  const SHOWZ  = __SHOWZ__;
-  const PAD    = __PAD__;
-  const PRIOR  = {large:0, medium:1, small:2};
-  const STEP   = __STEP__;     // candidate spacing (px)
-  const DRIFT  = __DRIFT__;    // max movement from default (px)
-  const EXTFRAC= __EXTFRAC__;
+  const map = __MAP__;
+  const SHOWZ = __SHOWZ__;
+  const PAD   = __PAD__;
+  const PRIOR = {large:0, medium:1, small:2};
+  const DRIFT = __DRIFT__;
+  const EXTFRAC = __EXTFRAC__;
+  const ITERS = __ITERS__;
+  const FSTEP = __FSTEP__;
 
-  // ---------- small helpers ----------
+  // ---------- helpers ----------
   function getContainer(){ return map.getContainer(); }
   function rectBase(){
     const crect = getContainer().getBoundingClientRect();
@@ -249,12 +255,38 @@ def build_map() -> folium.Map:
       return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
     };
   }
-  function overlaps(a,b,p){
-    return !(a.x > b.x + b.w + p || b.x > a.x + a.w + p || a.y > b.y + b.h + p || b.y > a.y + a.h + p);
+  function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
+  function overlaps(A,B,p){
+    return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
   }
-  function inside(R, W, H, m=2){
-    return R.x >= m && R.y >= m && (R.x + R.w) <= (W - m) && (R.y + R.h) <= (H - m);
+  function mtv(A,B){ // minimal translation vector between axis-aligned rects
+    const ac = center(A), bc = center(B);
+    const dx = bc.x - ac.x, dy = bc.y - ac.y;
+    const px = (A.w/2 + B.w/2) - Math.abs(dx);
+    const py = (A.h/2 + B.h/2) - Math.abs(dy);
+    if (px <= 0 || py <= 0) return null;
+    if (px < py){
+      return { x: Math.sign(dx) * px, y: 0 };
+    }else{
+      return { x: 0, y: Math.sign(dy) * py };
+    }
   }
+  function rectCirclePenetration(R, Cx, Cy, Cr){ // penetration vector from circle to rect
+    const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
+    const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
+    let dx = (center(R).x - Cx), dy = (center(R).y - Cy);
+    const qx = Cx - rx, qy = Cy - ry;
+    const d2 = qx*qx + qy*qy;
+    const r  = Cr + PAD;
+    if (d2 >= r*r) return null;
+    const d = Math.max(1e-6, Math.sqrt(d2));
+    // push away from circle center; if center sits inside, use rect center vector
+    const ux = (d > 0 ? (qx/d) : (dx===0?1:Math.sign(dx)));
+    const uy = (d > 0 ? (qy/d) : (dy===0?0:Math.sign(dy)));
+    const pen = r - d;
+    return { x: -ux * pen, y: -uy * pen }; // vector to move rect out of circle
+  }
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
   function ensureWrap(el){
     let txt = el.querySelector('.ttxt');
     if (!txt){
@@ -268,8 +300,8 @@ def build_map() -> folium.Map:
     return txt;
   }
 
-  // Collect labels **with dot info**
-  function collect(){
+  // Collect labels with dot info and measure base rect (transform = 0)
+  function collect(rect){
     const items=[];
     map.eachLayer(lyr=>{
       if (!(lyr instanceof L.CircleMarker)) return;
@@ -282,120 +314,145 @@ def build_map() -> folium.Map:
       const cls = Array.from(el.classList);
       const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
       const txt = ensureWrap(el);
+      txt.style.transform = 'translate(0px,0px)'; // reset for measurement
+      const baseRect = rect(txt);
       const latlng = lyr.getLatLng();
       const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
-      items.push({ el, txt, size, latlng, radius });
+      const pt = map.latLngToContainerPoint(latlng);
+      items.push({ el, txt, size, baseRect, latlng, radius, pt, dx:0, dy:0, density:0 });
     });
     return items;
   }
 
-  // Density score (place crowded points first)
-  function addDensityScores(items){
-    const pts = items.map(it => map.latLngToContainerPoint(it.latlng));
-    const R = 60; // px radius for crowd check
+  // simple crowd score (labels in a 70px radius)
+  function scoreDensity(items){
+    const R = 70;
     for (let i=0;i<items.length;i++){
-      let c = 0;
+      let c=0;
       for (let j=0;j<items.length;j++){
         if (i===j) continue;
-        const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+        const dx = items[i].pt.x - items[j].pt.x;
+        const dy = items[i].pt.y - items[j].pt.y;
         if (dx*dx + dy*dy <= R*R) c++;
       }
       items[i].density = c;
-      items[i].pt = pts[i];
     }
   }
 
-  // Spiral of candidate offsets around (0,0), many directions per ring
-  function spiralOffsets(){
-    const out = [{dx:0, dy:0}];
-    for (let r=STEP; r<=DRIFT; r+=STEP){
-      const N = Math.max(8, Math.round(2*Math.PI*r/STEP)); // more angles for larger radii
-      for (let k=0;k<N;k++){
-        const a = (2*Math.PI*k)/N;
-        out.push({ dx: Math.round(r*Math.cos(a)), dy: Math.round(r*Math.sin(a)) });
-      }
-    }
-    // prefer top-ish positions first
-    out.sort((a,b)=> (Math.atan2(a.dy, a.dx) - Math.PI/2) - (Math.atan2(b.dy, b.dx) - Math.PI/2));
-    return out;
-  }
-  const OFFSETS = spiralOffsets();
-
-  // Try to place one label using OFFSETS, avoiding dot + kept + map edges
-  function tryPlaceOne(it, kept, rect){
-    const W = map.getSize().x, H = map.getSize().y;
-    const dotPad = 2;
-    const dotBB = { x: it.pt.x - it.radius - dotPad, y: it.pt.y - it.radius - dotPad,
-                    w: 2*(it.radius + dotPad),        h: 2*(it.radius + dotPad) };
-    const base = it.txt.style.transform || '';
-    for (const c of OFFSETS){
-      it.txt.style.transform = `translate(${c.dx}px, ${c.dy}px)`;
-      const R = rect(it.txt);
-      if (!inside(R, W, H, 1)) continue;
-      if (overlaps(R, dotBB, PAD)) continue;
-      let bad = false;
-      for (const K of kept){ if (overlaps(R, K, PAD)) { bad = true; break; } }
-      if (!bad) return {ok:true, rect:R, dx:c.dx, dy:c.dy};
-    }
-    it.txt.style.transform = base;
-    return {ok:false};
+  function rectFrom(it, dx, dy){
+    return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
   }
 
-  function solveOnce(){
-    const items = collect(); if (!items.length) return;
+  function solve(){
+    const rect = rectBase();
+    let items = collect(rect);
+    if (!items.length) return;
+
+    // zoom gating + extended keep
     const z = map.getZoom();
     const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
     let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
     if (maxZ == null) maxZ = 19;
     const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
 
-    // gate + reset
     items.forEach(it=>{
       const baseGate = (SHOWZ[it.size] || 7);
       const extGate  = Math.max(minZ, baseGate - span);
       it.__baseGate = baseGate; it.__extGate = extGate;
-      if (z < extGate){ it.el.style.display = 'none'; }
-      else { it.el.style.display = 'block'; it.txt.style.transform = 'translate(0px,0px)'; it.txt.style.opacity='1'; }
+      if (z < extGate) it.el.style.display = 'none';
+      else it.el.style.display = 'block';
+      it.txt.style.opacity = '1';
+      it.dx = 0; it.dy = 0;
     });
 
-    const cand = items.filter(it => it.el.style.display !== 'none');
-    if (!cand.length) return;
+    items = items.filter(it => it.el.style.display !== 'none');
+    if (!items.length) return;
 
-    addDensityScores(cand);
-    const rect = rectBase();
-    const kept = [];
-
-    // place crowded + high-priority first
-    cand.sort((a,b)=>{
+    // priority: higher density first, then size, then y,x
+    scoreDensity(items);
+    items.sort((a,b)=>{
       const d = b.density - a.density; if (d) return d;
       const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
       return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
     });
 
-    for (const it of cand){
-      const placed = tryPlaceOne(it, kept, rect);
-      const inExt  = (z < it.__baseGate) && (z >= it.__extGate);
-      if (placed.ok){
-        it.txt.style.transform = `translate(${placed.dx}px, ${placed.dy}px)`;
-        kept.push(placed.rect);
+    const W = map.getSize().x, H = map.getSize().y;
+    const boundsMargin = 2;
+
+    // relaxation loop
+    for (let t=0; t<ITERS; t++){
+      // precompute rects
+      const rects = items.map(it => rectFrom(it, it.dx, it.dy));
+      const fx = new Array(items.length).fill(0);
+      const fy = new Array(items.length).fill(0);
+
+      // pairwise label-label pushes
+      for (let i=0;i<items.length;i++){
+        for (let j=i+1;j<items.length;j++){
+          const v = mtv(rects[i], rects[j]);
+          if (!v) continue;
+          // split the push
+          fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
+          fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
+        }
+      }
+
+      // label-dot (circle) separation + spring to anchor + edge pushes
+      for (let i=0;i<items.length;i++){
+        const it = items[i];
+        const R  = rects[i];
+
+        // dot (circle) push
+        const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
+        if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
+
+        // spring back to anchor (stay near dot)
+        fx[i] += -0.05 * it.dx;
+        fy[i] += -0.05 * it.dy;
+
+        // edge keep-in
+        if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
+        if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
+        if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
+        if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
+      }
+
+      // integrate + clamp drift
+      for (let i=0;i<items.length;i++){
+        items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
+        items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
+      }
+    }
+
+    // apply & final filtering in extended window
+    const finalRects = items.map(it => rectFrom(it, it.dx, it.dy));
+    for (let i=0;i<items.length;i++){
+      const it = items[i];
+      const R  = finalRects[i];
+      // if still mutually overlapping badly in the *extension* keep-range, hide
+      let collides = false;
+      for (let j=0;j<items.length;j++){
+        if (i===j) continue;
+        if (overlaps(R, finalRects[j], PAD)) { collides = true; break; }
+      }
+      const inExt = (z < it.__baseGate) && (z >= it.__extGate);
+      if (collides && inExt){
+        it.el.style.display = 'none';
       }else{
-        if (inExt){ it.el.style.display = 'none'; }
-        else { it.txt.style.opacity = '0.9'; kept.push(rect(it.txt)); } // keep, slightly dim
+        it.txt.style.transform = `translate(${Math.round(it.dx)}px, ${Math.round(it.dy)}px)`;
+        if (collides) it.txt.style.opacity = '0.9';
       }
     }
   }
 
-  // Two short improvement passes to relax late collisions
-  function solve(){
-    solveOnce();
-    requestAnimationFrame(()=> solveOnce());
-  }
-
+  // schedule
   let raf1=0, raf2=0;
-  function schedule(){ if (raf1) cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2);
-    raf1 = requestAnimationFrame(()=>{ raf2 = requestAnimationFrame(solve); }); }
-
-  map.whenReady(()=> setTimeout(schedule, 500));
+  function schedule(){
+    if (raf1) cancelAnimationFrame(raf1);
+    if (raf2) cancelAnimationFrame(raf2);
+    raf1 = requestAnimationFrame(()=>{ raf2 = requestAnimationFrame(solve); });
+  }
+  map.whenReady(()=> setTimeout(schedule, 400));
   map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
 
   const pane = map.getPanes().tooltipPane;
@@ -406,6 +463,7 @@ def build_map() -> folium.Map:
 })();
 </script>
 
+
 """
 
     # Substitute tokens (won’t touch any ${dx} in the JS)
@@ -415,6 +473,8 @@ def build_map() -> folium.Map:
     js = js.replace("__STEP__", str(int(STEP_PX)))
     js = js.replace("__DRIFT__",str(int(DRIFT_PX)))
     js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
+    js = js.replace("__ITERS__",  str(int(ITERS)))
+    js = js.replace("__FSTEP__",   str(FSTEP))\
     m.get_root().html.add_child(folium.Element(js))
 
     return m
