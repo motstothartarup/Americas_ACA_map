@@ -29,12 +29,15 @@ RADIUS = {"large": 8, "medium": 7, "small": 6}
 STROKE = 2
 
 LABEL_GAP_PX = 10
-SHOW_AT = dict(large=2, medium=3, small=4)
+SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
 PAD_PX = 2
 
-# Screen-space clustering radius (px) to consider labels in one stack
-STACK_CLUSTER_RADIUS_PX = 30
-EXT_FRACTION = 0.20
+# Placement solver knobs
+DRIFT_PX = 28     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
+ITERS    = 24     # relaxation iterations
+FSTEP    = 0.55   # solver step (0.45–0.65 good)
+
+EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -162,9 +165,9 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "stacker-r1.4"
+    SOLVER_VER = "solver-r3.5"
 
-    # --- CSS + footer badge ---
+    # --- CSS + footer badge (no f-strings; tokens replaced) ---
     badge_html = r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
@@ -189,19 +192,10 @@ def build_map() -> folium.Map:
   box-shadow:0 2px 8px rgba(0,0,0,.12);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
 }
-/* Stack UI */
-.iata-stack{
-  position:absolute; z-index:400; pointer-events:auto;
-  background:rgba(255,255,255,.94); border:1px solid rgba(0,0,0,.18);
-  border-radius:8px; padding:6px 8px;
-  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
-  box-shadow:0 6px 18px rgba(0,0,0,.12);
-}
-.iata-stack .row{ padding:2px 4px; border-radius:6px; white-space:nowrap; cursor:pointer; user-select:none; }
-.iata-stack .row:hover{ background:rgba(0,0,0,.06); }
 </style>
 <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
-""".replace("__UPDATED__", updated).replace("__VER__", SOLVER_VER)
+"""
+    badge_html = badge_html.replace("__UPDATED__", updated).replace("__VER__", SOLVER_VER)
     m.get_root().html.add_child(folium.Element(badge_html))
 
     # dots + permanent tooltips
@@ -240,255 +234,259 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: cluster-and-stack labeler (hardened boot) ---
+    # --- JS: physics-style relaxation to push labels apart within DRIFT_PX ---
+    # IMPORTANT: this goes into the *script bucket* WITHOUT <script> tags.
     js = r"""
-// ===== ACA stacker bootstrap (r1.4) =====
 (function(){
-  if (window.__ACA_STACKER__) return;        // idempotent
-  window.__ACA_STACKER__ = true;
+  try {
+    console.debug("[ACA] solver r3.5 start");
 
-  const SHOWZ     = __SHOWZ__;
-  const PAD       = __PAD__;
-  const EXTFRAC   = __EXTFRAC__;
-  const CLUSTER_R = __CLUSTERR__;   // px
+    const MAP = __MAP__;
+    const SHOWZ = __SHOWZ__;
+    const PAD   = __PAD__;
+    const PRIOR = {large:0, medium:1, small:2};
+    const DRIFT = __DRIFT__;
+    const EXTFRAC = __EXTFRAC__;
+    const ITERS = __ITERS__;
+    const FSTEP = __FSTEP__;
 
-  // resolve Leaflet map: direct var, or scan window for map_*
-  function resolveMap(){
-    try { return __MAP__; } catch(e) {}
-    for (const k in window){
-      if (!Object.prototype.hasOwnProperty.call(window,k)) continue;
-      const v = window[k];
-      if (/^map_/.test(k) && v && v.getContainer && v.getPanes) return v;
+    function until(cond, cb, tries=80, delay=100){
+      (function tick(n){
+        if (cond()) return cb();
+        if (n<=0) return;
+        setTimeout(()=>tick(n-1), delay);
+      })(tries);
     }
-    return null;
-  }
 
-  function until(cond, cb, tries=240, delay=100){
-    (function tick(n){
-      if (cond()) return cb();
-      if (n<=0) return;
-      setTimeout(()=>tick(n-1), delay);
-    })(tries);
-  }
+    until(
+      ()=> typeof MAP !== "undefined" && MAP && MAP.getPanes && MAP.getContainer,
+      init,
+      80, 100
+    );
 
-  function init(){
-    const map = resolveMap();
-    if (!map) return; // keep waiting
+    function init(){
+      const map = MAP;
+      console.debug("[ACA] solver r3.5 init on", map);
 
-    // once-only dashed outline so you can *see* the script is active
-    const styleTag = document.createElement("style");
-    styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
-    document.head.appendChild(styleTag);
-    setTimeout(()=> styleTag.remove(), 1500);
+      // brief outline to prove script executed
+      const styleTag = document.createElement("style");
+      styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
+      document.head.appendChild(styleTag);
+      setTimeout(()=> styleTag.remove(), 1500);
 
-    const pane = map.getPanes && map.getPanes().tooltipPane;
-    if (!pane) return;
-
-    const mapEl = map.getContainer();
-
-    function rectBase(){
-      const crect = mapEl.getBoundingClientRect();
-      return function rect(el){
-        const r = el.getBoundingClientRect();
-        return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
-      };
-    }
-    function ensureWrap(el){
-      let txt = el.querySelector('.ttxt');
-      if (!txt){
-        const span = document.createElement('span');
-        span.className = 'ttxt';
-        span.textContent = el.textContent;
-        el.textContent = '';
-        el.appendChild(span);
-        txt = span;
+      function getContainer(){ return map.getContainer(); }
+      function rectBase(){
+        const crect = getContainer().getBoundingClientRect();
+        return function rect(el){
+          const r = el.getBoundingClientRect();
+          return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
+        };
       }
-      return txt;
-    }
-    function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
-    function overlaps(A,B,p){
-      return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
-    }
-    function bboxFromPoints(pts){
-      let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
-      for (const p of pts){ if (p.x<minx) minx=p.x; if (p.y<miny) miny=p.y; if (p.x>maxx) maxx=p.x; if (p.y>maxy) maxy=p.y; }
-      return {x:minx, y=miny, w:(maxx-minx), h:(maxy-miny)};
-    }
+      function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
+      function overlaps(A,B,p){
+        return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
+      }
+      function mtv(A,B){
+        const ac = center(A), bc = center(B);
+        const dx = bc.x - ac.x, dy = bc.y - ac.y;
+        const px = (A.w/2 + B.w/2) - Math.abs(dx);
+        const py = (A.h/2 + B.h/2) - Math.abs(dy);
+        if (px <= 0 || py <= 0) return null;
+        if (px < py) return { x: Math.sign(dx) * px, y: 0 };
+        return { x: 0, y: Math.sign(dy) * py };
+      }
+      function rectCirclePenetration(R, Cx, Cy, Cr){
+        const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
+        const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
+        const qx = Cx - rx, qy = Cy - ry;
+        const d2 = qx*qx + qy*qy;
+        const r  = Cr + PAD;
+        if (d2 >= r*r) return null;
+        const d = Math.max(1e-6, Math.sqrt(d2));
+        const ux = qx / d, uy = qy / d;
+        const pen = r - d;
+        return { x: -ux * pen, y: -uy * pen };
+      }
+      function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+      function ensureWrap(el){
+        let txt = el.querySelector('.ttxt');
+        if (!txt){
+          const span = document.createElement('span');
+          span.className = 'ttxt';
+          span.textContent = el.textContent;
+          el.textContent = '';
+          el.appendChild(span);
+          txt = span;
+        }
+        return txt;
+      }
 
-    // collect all layers that have tooltips and latlngs (robust across Folium versions)
-    function collect(rect){
-      const items=[];
-      map.eachLayer(lyr=>{
-        if (!lyr || typeof lyr.getTooltip!=='function' || typeof lyr.getLatLng!=='function') return;
-        const tt = lyr.getTooltip();
-        if (!tt) return;
-        if (!tt._container) tt.update();
-        const el = tt._container;
-        if (!el || !el.classList || !el.classList.contains('iata-tt')) return;
+      function collect(rect){
+        const items=[];
+        map.eachLayer(lyr=>{
+          if (!(lyr instanceof L.CircleMarker)) return;
+          const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
+          if (!tt) return;
+          if (!tt._container) tt.update();
+          const el = tt._container;
+          if (!el || !el.classList.contains('iata-tt')) return;
 
-        const txt = ensureWrap(el);
-        txt.style.transform = 'translate(0px,0px)'; // reset
-        const baseRect = rect(txt);
-        const latlng = lyr.getLatLng();
-        const pt = map.latLngToContainerPoint(latlng);
+          const cls = Array.from(el.classList);
+          const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
+          const txt = ensureWrap(el);
+          txt.style.transform = 'translate(0px,0px)'; // reset to measure
+          const baseRect = rect(txt);
+          const latlng = lyr.getLatLng();
+          const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
+          const pt = map.latLngToContainerPoint(latlng);
+          items.push({ el, txt, size, baseRect, latlng, radius, pt, dx:0, dy:0, density:0 });
+        });
+        return items;
+      }
 
-        // size class (for SHOWZ gate)
-        const cls = Array.from(el.classList || []);
-        const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
-
-        items.push({ lyr, el, txt, baseRect, latlng, pt, size, visible:true });
-      });
-      return items;
-    }
-
-    class UF{
-      constructor(n){ this.p=Array.from({length:n},(_,i)=>i); this.r=new Array(n).fill(0); }
-      find(x){ return this.p[x]===x?x:(this.p[x]=this.find(this.p[x])); }
-      union(a,b){ a=this.find(a); b=this.find(b);
-        if(a===b) return; if(this.r[a]<this.r[b]) [a,b]=[b,a]; this.p[b]=a; if(this.r[a]===this.r[b]) this.r[a]++; }
-      groups(n){ const g=new Map(); for(let i=0;i<n;i++){ const r=this.find(i); (g.get(r)||g.set(r,[])).push(i); } return Array.from(g.values()); }
-    }
-
-    function clearStacks(){
-      pane.querySelectorAll('.iata-stack').forEach(n=>n.remove());
-    }
-
-    function renderStack(clusterIdxs, items){
-      const pts = clusterIdxs.map(i => items[i].pt);
-      const bb = bboxFromPoints(pts);
-
-      const mapSize = map.getSize();
-      let estW = 0; clusterIdxs.forEach(i=>{ estW = Math.max(estW, items[i].baseRect.w); });
-      const rowH = 16; const estH = clusterIdxs.length * rowH;
-
-      const GUTTER = 8;
-      let left = bb.x + bb.w + GUTTER;
-      let top  = Math.max(6, bb.y - 4);
-      if (left + estW + 12 > mapSize.x) left = Math.max(6, bb.x - GUTTER - estW);
-      if (top + estH + 6 > mapSize.y)   top  = Math.max(6, mapSize.y - estH - 6);
-
-      const box = document.createElement('div');
-      box.className = 'iata-stack';
-      box.style.left = Math.round(left) + 'px';
-      box.style.top  = Math.round(top) + 'px';
-
-      const rows = clusterIdxs
-        .slice()
-        .sort((i,j)=> items[i].txt.textContent.localeCompare(items[j].txt.textContent));
-      rows.forEach(i=>{
-        const row = document.createElement('div');
-        row.className = 'row';
-        row.textContent = items[i].txt.textContent;
-        row.title = 'Open details';
-        row.addEventListener('click', ()=>{ items[i].lyr.openPopup(); });
-        row.addEventListener('mouseenter', ()=>{ items[i].txt.style.opacity = '0.9'; });
-        row.addEventListener('mouseleave', ()=>{ items[i].txt.style.opacity = '1'; });
-        box.appendChild(row);
-      });
-
-      pane.appendChild(box);
-    }
-
-    function gateByZoom(items){
-      const z = map.getZoom();
-      const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
-      let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
-      if (maxZ == null) maxZ = 19;
-      const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
-      items.forEach(it=>{
-        const baseGate = (SHOWZ[it.size] || 7);
-        const extGate  = Math.max(minZ, baseGate - span);
-        it._gateBase = baseGate; it._gateExt = extGate;
-        it.visible = (z >= extGate);
-      });
-    }
-
-    function layout(){
-      clearStacks();
-      const rect = rectBase();
-
-      let items = collect(rect);
-      if (!items.length) return;
-
-      // zoom gate then prepare DOM state
-      gateByZoom(items);
-      items.forEach(it=>{
-        it.el.style.display = it.visible ? 'block' : 'none';
-        it.txt.style.transform = 'translate(0px,0px)';
-        it.txt.style.opacity = '1';
-      });
-
-      // only visible items participate
-      const vis = items.map((it,idx)=>({it,idx})).filter(x=>x.it.visible);
-      if (!vis.length) return;
-      vis.forEach(x=>{ x.it.baseRect = rect(x.it.txt); });
-
-      // cluster by (1) label overlap OR (2) dot proximity within CLUSTER_R
-      const uf = new UF(vis.length);
-      for (let a=0; a<vis.length; a++){
-        for (let b=a+1; b<vis.length; b++){
-          const A = vis[a].it.baseRect, B = vis[b].it.baseRect;
-          const overlap = overlaps(A,B,PAD);
-          const close   = dist2(vis[a].it.pt, vis[b].it.pt) <= (CLUSTER_R*CLUSTER_R);
-          if (overlap || close) uf.union(a,b);
+      function scoreDensity(items){
+        const R = 70;
+        for (let i=0;i<items.length;i++){
+          let c=0;
+          for (let j=0;j<items.length;j++){
+            if (i===j) continue;
+            const dx = items[i].pt.x - items[j].pt.x;
+            const dy = items[i].pt.y - items[j].pt.y;
+            if (dx*dx + dy*dy <= R*R) c++;
+          }
+          items[i].density = c;
         }
       }
-      const comps = uf.groups(vis.length);
 
-      // render stacks (size>=2), keep singletons
-      for (const comp of comps){
-        if (comp.length >= 2){
-          const idxs = comp.map(i => vis[i].idx);
-          idxs.forEach(i => { items[i].el.style.display = 'none'; });
-          renderStack(idxs, items);
-        }else{
-          const i = vis[comp[0]].idx;
-          items[i].el.style.display = 'block';
-          items[i].txt.style.transform = 'translate(0px,0px)';
+      function rectFrom(it, dx, dy){
+        return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
+      }
+
+      function solve(){
+        const rect = rectBase();
+        let items = collect(rect);
+        if (!items.length) return;
+
+        const z = map.getZoom();
+        const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
+        let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
+        if (maxZ == null) maxZ = 19;
+        const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
+
+        items.forEach(it=>{
+          const baseGate = (SHOWZ[it.size] || 7);
+          const extGate  = Math.max(minZ, baseGate - span);
+          it.__baseGate = baseGate; it.__extGate = extGate;
+          if (z < extGate) it.el.style.display = 'none';
+          else it.el.style.display = 'block';
+          it.txt.style.opacity = '1';
+          it.dx = 0; it.dy = 0;
+        });
+
+        items = items.filter(it => it.el.style.display !== 'none');
+        if (!items.length) return;
+
+        scoreDensity(items);
+        items.sort((a,b)=>{
+          const d = b.density - a.density; if (d) return d;
+          const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
+          return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
+        });
+
+        const W = map.getSize().x, H = map.getSize().y;
+        const boundsMargin = 2;
+
+        for (let t=0; t<ITERS; t++){
+          const rects = items.map(it => rectFrom(it, it.dx, it.dy));
+          const fx = new Array(items.length).fill(0);
+          const fy = new Array(items.length).fill(0);
+
+          // label-label pushes (split MTV)
+          for (let i=0;i<items.length;i++){
+            for (let j=i+1;j<items.length;j++){
+              const v = mtv(rects[i], rects[j]);
+              if (!v) continue;
+              fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
+              fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
+            }
+          }
+
+          // label-dot (circle) separation + spring + edges
+          for (let i=0;i<items.length;i++){
+            const it = items[i];
+            const R  = rects[i];
+            const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
+            if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
+
+            // spring to anchor (keep near dot)
+            fx[i] += -0.05 * it.dx;
+            fy[i] += -0.05 * it.dy;
+
+            // keep inside view
+            if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
+            if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
+            if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
+            if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
+          }
+
+          // integrate + clamp drift radius
+          for (let i=0;i<items.length;i++){
+            items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
+            items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
+          }
+        }
+
+        const finals = items.map(it => rectFrom(it, it.dx, it.dy));
+        for (let i=0;i<items.length;i++){
+          const it = items[i];
+          const R  = finals[i];
+          let collides = false;
+          for (let j=0;j<items.length;j++){
+            if (i===j) continue;
+            if (overlaps(R, finals[j], PAD)) { collides = true; break; }
+          }
+          const inExt = (z < it.__baseGate) && (z >= it.__extGate);
+          if (collides && inExt){
+            it.el.style.display = 'none';
+          }else{
+            it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
+            if (collides) it.txt.style.opacity = "0.9";
+          }
         }
       }
+
+      // schedule
+      let raf1=0, raf2=0;
+      function schedule(){
+        if (raf1) cancelAnimationFrame(raf1);
+        if (raf2) cancelAnimationFrame(raf2);
+        raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
+      }
+      map.whenReady(function(){ setTimeout(schedule, 400); });
+      map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
+
+      const pane = map.getPanes().tooltipPane;
+      if (pane && 'MutationObserver' in window){
+        const mo = new MutationObserver(schedule);
+        mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
+      }
     }
-
-    // run layout after we *actually* have tooltip DOM elements
-    function hasTooltips(){
-      return !!(pane && pane.querySelector('.iata-tt'));
-    }
-
-    // schedule on many signals to outsmart static hosting
-    let raf=0;
-    function schedule(){ if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(layout); }
-
-    // First run once tooltips appear
-    until(()=>hasTooltips(), ()=>{ schedule(); }, 200, 50);
-
-    map.whenReady(()=> setTimeout(schedule, 250));
-    map.on('zoomend moveend overlayadd overlayremove layeradd layerremove tileload resize', schedule);
-
-    if (pane && 'MutationObserver' in window){
-      const mo = new MutationObserver(()=>schedule());
-      mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
-    }
-
-    if (document.readyState === 'complete') setTimeout(schedule, 150);
-    else window.addEventListener('load', ()=> setTimeout(schedule, 150), { once:true });
+  } catch (err) {
+    console.error("[ACA] solver r3.5 crashed:", err);
   }
-
-  // Keep trying until the map is resolvable
-  until(()=> !!resolveMap(), init, 240, 100);
 })();
 """
 
-    js = (
-        js.replace("__MAP__", m.get_name())
-          .replace("__SHOWZ__", json.dumps(SHOW_AT))
-          .replace("__PAD__",  str(int(PAD_PX)))
-          .replace("__EXTFRAC__", str(EXT_FRACTION))
-          .replace("__CLUSTERR__", str(int(STACK_CLUSTER_RADIUS_PX)))
-    )
+    # Substitute tokens (no ${...} conflicts) and put JS in the script bucket
+    js = js.replace("__MAP__", m.get_name())
+    js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
+    js = js.replace("__PAD__",  str(int(PAD_PX)))
+    js = js.replace("__DRIFT__", str(int(DRIFT_PX)))
+    js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
+    js = js.replace("__ITERS__",  str(int(ITERS)))
+    js = js.replace("__FSTEP__",  str(FSTEP))
 
-    # Inject via Folium's script bucket (works on GH Pages)
     m.get_root().script.add_child(folium.Element(js))
-
     return m
 
 
@@ -501,4 +499,5 @@ if __name__ == "__main__":
     except Exception as e:
         print("ERROR building map:", e, file=sys.stderr)
         write_error_page(str(e))
+        # Keep Pages live even if fetch/parsing fails.
         sys.exit(0)
