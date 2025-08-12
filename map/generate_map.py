@@ -1,13 +1,12 @@
 # map/generate_map.py
 # Builds docs/index.html with the ACA Americas map (labels only, L/R nudging, ~20% extended keep).
-# Safe for GitHub Actions: if data fetch fails, writes a fallback page so Pages still serves something.
+# If data fetch fails, writes a fallback page so Pages still serves something.
 
 import io
 import json
 import os
 import sys
 from datetime import datetime, timezone
-from string import Template
 
 import folium
 import pandas as pd
@@ -227,18 +226,17 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS (string.Template; no .replace chaining) ---
-    js_template = Template(
-        r"""
+    # --- JS with custom placeholders to avoid ${dx} conflicts ---
+    js = r"""
 <script>
 (function(){
-  const map = $MAP;
-  const SHOWZ = $SHOWZ;
-  const PAD   = $PAD;
+  const map = __MAP__;
+  const SHOWZ = __SHOWZ__;
+  const PAD   = __PAD__;
   const PRIOR = {large:0, medium:1, small:2};
-  const STEP  = $STEP;
-  const STEPS = $STEPS;
-  const EXTFRAC = $EXTFRAC;
+  const STEP  = __STEP__;
+  const STEPS = __STEPS__;
+  const EXTFRAC = __EXTFRAC__;
 
   function getContainer(){ return map.getContainer(); }
   function getTooltipPane(){ return map.getPanes().tooltipPane; }
@@ -363,16 +361,14 @@ def build_map() -> folium.Map:
 })();
 </script>
 """
-    )
 
-    js = js_template.safe_substitute(
-        MAP=m.get_name(),
-        SHOWZ=json.dumps(SHOW_AT),
-        PAD=int(PAD_PX),
-        STEP=int(SHIFT_PX),
-        STEPS=int(MAX_STEPS),
-        EXTFRAC=EXT_FRACTION,
-    )
+    # Substitute our unique tokens without touching ${dx} in the JS
+    js = js.replace("__MAP__", m.get_name())
+    js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
+    js = js.replace("__PAD__", str(int(PAD_PX)))
+    js = js.replace("__STEP__", str(int(SHIFT_PX)))
+    js = js.replace("__STEPS__", str(int(MAX_STEPS)))
+    js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
     m.get_root().html.add_child(folium.Element(js))
 
     return m
