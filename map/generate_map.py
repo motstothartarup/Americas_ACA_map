@@ -1,4 +1,11 @@
-import io, json, os
+# map/generate_map.py
+# Builds docs/index.html with the ACA Americas map (labels only, L/R nudging, ~20% extended keep).
+# Designed for GitHub Actions: runs daily, overwrites docs/index.html.
+# If data fetch fails, writes a friendly fallback page so Pages stays live.
+
+import io, json, os, sys
+from datetime import datetime, timezone
+
 import pandas as pd
 import requests
 import folium
@@ -11,26 +18,86 @@ PALETTE = {
     "Level 1":"#5B2C6F","Level 2":"#00AEEF","Level 3":"#1F77B4",
     "Level 3+":"#2ECC71","Level 4":"#F4D03F","Level 4+":"#E39A33","Level 5":"#E74C3C"
 }
-RADIUS = {"large":8, "medium":7, "small":6}  # bigger dots
+RADIUS = {"large":8, "medium":7, "small":6}
 STROKE = 2
 
 LABEL_GAP_PX = 10
-SHOW_AT      = dict(large=2, medium=3, small=4)   # base gates
-PAD_PX       = 2                                  # label overlap padding
-SHIFT_PX     = 14                                 # horizontal nudge step (px)
-MAX_STEPS    = 10                                 # attempts each side
-EXT_FRACTION = 0.20                               # ~20% zoom extension window
+SHOW_AT      = dict(large=2, medium=3, small=4)
+PAD_PX       = 2
+SHIFT_PX     = 14
+MAX_STEPS    = 10
+EXT_FRACTION = 0.20   # ~20% of zoom range
 
-OUT_DIR = "docs"
+OUT_DIR  = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
 
-# ---------- data ----------
-def fetch_aca():
+
+# ---------- helpers ----------
+def write_error_page(msg: str):
+    """Write a simple HTML explaining why the map couldn't be generated."""
+    os.makedirs(OUT_DIR, exist_ok=True)
+    updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    html = f"""<!doctype html><meta charset="utf-8">
+<title>ACA Americas map</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+<meta http-equiv="Pragma" content="no-cache"/>
+<meta http-equiv="Expires" content="0"/>
+<style>body{{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:24px;color:#233;max-width:900px;margin:auto;background:#f6f8fb}}
+.card{{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);padding:20px}}
+h1{{margin:0 0 10px 0}}code{{background:#f5f7fb;padding:2px 6px;border-radius:6px}}</style>
+<div class="card">
+  <h1>ACA Americas map</h1>
+  <p><strong>Status:</strong> temporarily unavailable.</p>
+  <p><strong>Reason:</strong> {msg}</p>
+  <p>Last attempt: {updated}. This page updates automatically once per day.</p>
+</div>"""
+    with open(OUT_FILE, "w", encoding="utf-8") as f:
+        f.write(html)
+    print("Wrote fallback page:", OUT_FILE)
+
+
+def fetch_aca_html(timeout=45) -> str:
     url = "https://www.airportcarbonaccreditation.org/accredited-airports/"
-    html = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=30).text
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; ACA-Map-Bot/1.0)",
+        "Accept": "text/html,application/xhtml+xml"
+    }
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+
+def parse_aca_table(html: str) -> pd.DataFrame:
+    """Return dataframe with columns: iata, airport, country, region, aca_level, region4."""
     soup = BeautifulSoup(html, "lxml")
+    dfs = []
+
+    # First try the expected table
     table = soup.select_one(".airports-listview table")
-    raw = pd.read_html(io.StringIO(str(table)))[0]
+    if table is not None:
+        try:
+            dfs = pd.read_html(io.StringIO(str(table)))
+        except Exception as e:
+            print("read_html on scoped table failed:", e, file=sys.stderr)
+
+    # Fallback: scan all tables for expected headers
+    if not dfs:
+        try:
+            all_tables = pd.read_html(html)
+        except Exception as e:
+            raise RuntimeError(f"Could not parse any HTML tables: {e}")
+        target = None
+        want = {"airport", "airport code", "country", "region", "level"}
+        for df in all_tables:
+            cols = {str(c).strip().lower() for c in df.columns}
+            if want.issubset(cols):
+                target = df
+                break
+        if target is None:
+            raise RuntimeError("ACA table not found on the page.")
+        dfs = [target]
+
+    raw = dfs[0]
     aca = (raw.rename(columns={"Airport":"airport","Airport code":"iata",
                                "Country":"country","Region":"region","Level":"aca_level"})
                [["iata","airport","country","region","aca_level"]])
@@ -39,9 +106,13 @@ def fetch_aca():
         if r == "UKIMEA": return "Europe"
         return r
     aca["region4"] = aca["region"].map(region4)
-    return aca[aca["aca_level"].isin(LEVELS)].dropna(subset=["iata"])
+    aca = aca[aca["aca_level"].isin(LEVELS)].dropna(subset=["iata"])
+    if aca.empty:
+        raise RuntimeError("ACA dataframe is empty after filtering.")
+    return aca
 
-def load_coords():
+
+def load_coords() -> pd.DataFrame:
     url = "https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv"
     use = ["iata_code","latitude_deg","longitude_deg","type","name","iso_country"]
     df = pd.read_csv(url, usecols=use).rename(columns={"iata_code":"iata"})
@@ -49,20 +120,29 @@ def load_coords():
     df["size"] = df["type"].map({"large_airport":"large","medium_airport":"medium"}).fillna("small")
     return df
 
-def build_map():
-    aca = fetch_aca()
+
+# ---------- main map builder ----------
+def build_map() -> folium.Map:
+    aca_html = fetch_aca_html()
+    aca = parse_aca_table(aca_html)
     coords = load_coords()
+
     amer = (aca[aca["region4"].eq("Americas")]
               .merge(coords, on="iata", how="left")
               .dropna(subset=["latitude_deg","longitude_deg"]))
 
+    if amer.empty:
+        raise RuntimeError("No rows for the Americas after joining coordinates.")
+
     bounds = [[amer.latitude_deg.min(), amer.longitude_deg.min()],
               [amer.latitude_deg.max(), amer.longitude_deg.max()]]
+
     m = folium.Map(tiles="CartoDB Positron", zoomControl=True, prefer_canvas=True)
     m.fit_bounds(bounds)
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
-    # Styles + inline JS (labels only; L/R nudging; ~20% extended keep)
+    # CSS + cache-busting meta + "last updated" badge
+    updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     m.get_root().html.add_child(folium.Element(f"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
@@ -75,25 +155,34 @@ def build_map():
   font-weight: 1000; font-size: 12px; letter-spacing: 0.5px;
   text-transform: uppercase; white-space: nowrap;
 }}
-/* hide Leaflet's white arrow */
+/* hide Leaflet's arrow */
 .leaflet-tooltip-top:before,
 .leaflet-tooltip-bottom:before,
 .leaflet-tooltip-left:before,
 .leaflet-tooltip-right:before{{ display:none !important; }}
 .leaflet-tooltip.iata-tt .ttxt{{ display:inline-block; transform:translateX(0px); will-change:transform; }}
 .leaflet-control-layers-expanded{{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }}
+.last-updated {{
+  position:absolute; right:12px; bottom:12px; z-index:9999;
+  background:#fff; padding:6px 8px; border-radius:8px;
+  box-shadow:0 2px 8px rgba(0,0,0,.12);
+  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
+}}
 </style>
+<div class="last-updated">Last updated: {updated}</div>
 """))
 
+    # Markers + tooltip labels
     for _, r in amer.iterrows():
         lat, lon = float(r.latitude_deg), float(r.longitude_deg)
         size = r.size
-        radius = RADIUS.get(size,6)
+        radius = RADIUS.get(size, 6)
         offset_y = -(radius + STROKE + max(LABEL_GAP_PX, 1))
 
         dot = folium.CircleMarker(
             [lat, lon], radius=radius,
-            color="#111", weight=STROKE, fill=True, fill_color=PALETTE[r.aca_level], fill_opacity=0.95,
+            color="#111", weight=STROKE, fill=True,
+            fill_color=PALETTE.get(r.aca_level, "#666"), fill_opacity=0.95,
             popup=folium.Popup(
                 f"<b>{r.airport}</b><br>IATA: {r.iata}<br>ACA: <b>{r.aca_level}</b><br>Country: {r.country}",
                 max_width=320),
@@ -107,7 +196,7 @@ def build_map():
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # JS: L/R nudging + ~20% extended keep; NO leader lines
+    # JS: label nudging + ~20% extended keep; NO leader lines
     js = r"""
 <script>
 (function(){
@@ -242,19 +331,27 @@ def build_map():
   }
 })();
 </script>
-""".replace("%MAP%", m.get_name())
-   .replace("%SHOWZ%", json.dumps(SHOW_AT))
-   .replace("%PAD%",  str(int(PAD_PX)))
-   .replace("%STEP%", str(int(SHIFT_PX)))
-   .replace("%STEPS%",str(int(MAX_STEPS)))
-   .replace("%EXTFRAC%", str(EXT_FRACTION))
-    )
-
+"""
+    # Do replacements on separate lines to avoid indentation errors
+    js = js.replace("%MAP%", m.get_name())
+    js = js.replace("%SHOWZ%", json.dumps(SHOW_AT))
+    js = js.replace("%PAD%",  str(int(PAD_PX)))
+    js = js.replace("%STEP%", str(int(SHIFT_PX)))
+    js = js.replace("%STEPS%",str(int(MAX_STEPS)))
+    js = js.replace("%EXTFRAC%", str(EXT_FRACTION))
     m.get_root().html.add_child(folium.Element(js))
+
     return m
+
 
 if __name__ == "__main__":
     os.makedirs(OUT_DIR, exist_ok=True)
-    m = build_map()
-    m.save(OUT_FILE)
-    print("Wrote", OUT_FILE)
+    try:
+        m = build_map()
+        m.save(OUT_FILE)
+        print("Wrote", OUT_FILE)
+    except Exception as e:
+        print("ERROR building map:", e, file=sys.stderr)
+        write_error_page(str(e))
+        # ensure non-zero exit doesn't kill workflow (we still wrote a page)
+        sys.exit(0)
