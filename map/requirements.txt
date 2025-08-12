@@ -1,0 +1,5 @@
+folium
+pandas
+requests
+beautifulsoup4
+lxml
