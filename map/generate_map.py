@@ -2,7 +2,7 @@
 # Dots + labels + smooth zoom + simple position DB.
 # Stacks appear when zoomed OUT (z <= STACK_ON_AT_Z), grouped by ~30 miles (auto-scaled to px).
 # Anchored on one member's label, styled like normal labels.
-# Hide ALL labels at very low zoom (z < HIDE_LABELS_BELOW_Z).
+# Hides ALL labels at very low zoom (z < HIDE_LABELS_BELOW_Z).
 
 import io
 import json
@@ -179,7 +179,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.6-zoom+posdb+stack-out+miles"
+    BUILD_VER = "base-r1.7-zoom+posdb+stack-out+miles+pane-anchoring"
 
     # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
@@ -334,12 +334,12 @@ def build_map() -> folium.Map:
       }
 
       // helpers
-      function getContainer(){ return map.getContainer(); }
-      function rectBase(){
-        const crect = getContainer().getBoundingClientRect();
+      function rectBaseForPane(thePane){
+        // compute rectangles relative to the *pane*, not the container
+        const prect = thePane.getBoundingClientRect();
         return function rect(el){
           const r = el.getBoundingClientRect();
-          return { x:r.left - crect.left, y:r.top - crect.top, w:r.width, h:r.height };
+          return { x:r.left - prect.left, y:r.top - prect.top, w:r.width, h:r.height };
         };
       }
       function ensureWrap(el){
@@ -355,15 +355,12 @@ def build_map() -> folium.Map:
         return txt;
       }
       function showAllLabels(){
-        if (!pane) return;
         pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = ''; });
       }
       function hideAllLabels(){
-        if (!pane) return;
         pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = 'none'; });
       }
       function clearStacks(){
-        if (!pane) return;
         pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
       }
 
@@ -379,9 +376,9 @@ def build_map() -> folium.Map:
         return meters * pxPerMeter;
       }
 
-      // collect label/dot items (ensure current positions)
+      // collect label/dot items (measure relative to the tooltip pane)
       function collectItems(){
-        const rect = rectBase();
+        const rect = rectBaseForPane(pane);
         const items = [];
         map.eachLayer(lyr=>{
           if (!(lyr instanceof L.CircleMarker)) return;
@@ -393,14 +390,14 @@ def build_map() -> folium.Map:
           el.style.display = ''; // ensure visible to measure
 
           const latlng = lyr.getLatLng();
-          const pt = map.latLngToContainerPoint(latlng);
+          const pt = map.latLngToContainerPoint(latlng); // for clustering distance only
           const cls = Array.from(el.classList);
           const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
           const iata = (cls.find(c=>c.startsWith('tt-'))||'tt-').slice(3);
           const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
 
           const txt = ensureWrap(el);
-          const R = rect(txt);
+          const R = rect(txt); // coords relative to the pane
           const cx = R.x + R.w/2, cy = R.y + R.h/2;
 
           items.push({
@@ -454,8 +451,7 @@ def build_map() -> folium.Map:
         });
         pane.appendChild(div);
 
-        // place exactly where the anchor label is (top-left)
-        // re-measure next frame to be sure after DOM/layout settles
+        // place exactly where the anchor label is (top-left), after layout settles
         requestAnimationFrame(()=>{
           div.style.left = Math.round(anchor.label.x) + "px";
           div.style.top  = Math.round(anchor.label.y) + "px";
@@ -519,8 +515,8 @@ def build_map() -> folium.Map:
         updateMeter();
         // Double RAF: wait for Leaflet to finish placing layers/labels after zoom.
         requestAnimationFrame(()=>requestAnimationFrame(()=>{
-          const items = collectItems();
-          const { stacks } = applyClustering(items);
+          const items = collectItems();              // positions relative to pane
+          const { stacks } = applyClustering(items); // cluster + draw
           pushSnapshot(buildSnapshot(items, stacks));
         }));
       }
@@ -536,7 +532,7 @@ def build_map() -> folium.Map:
       map.on('zoom', updateMeter);
 
       // Compute positions/clusters only when motion/zoom finishes
-      map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
+      map.on('zoomend moveend overlayadd overlayremove layeradd layerremove resize', scheduleUpdate);
 
       const snap = window.ACA_DB.get();
       if (snap){
