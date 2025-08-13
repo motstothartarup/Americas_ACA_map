@@ -31,22 +31,22 @@ STROKE = 2
 
 LABEL_GAP_PX = 10
 SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
-PAD_PX = 4                                    # ↑ makes overlap detection a bit more sensitive
+PAD_PX = 12                                    # ↑ makes overlap detection a bit more sensitive
 
 # Placement solver knobs
 DRIFT_PX = 40     # max label drift from dot (px)
 ITERS = 40        # relaxation iterations
 FSTEP = 0.50      # solver step
 
-EXT_FRACTION = 0.1  # ~20% of zoom range for “extended keep”
+EXT_FRACTION = 0.01  # ~20% of zoom range for “extended keep”
 
 # --- NEW behavior knobs (you can tweak these) ---
 DOT_HIDE_BELOW_Z = 4         # hide all DOTS (not labels) when zoom < this
-ALIGN_LEFT_AT_Z   = 6        # when zoom <= this, stacks anchor LEFT of cluster bbox
+ALIGN_LEFT_AT_Z   = 12        # when zoom <= this, stacks anchor LEFT of cluster bbox
 STACK_R_PX        = 100       # screen-pixel proximity that triggers stacking
 NEAR_MILES        = 100       # “same city” clustering radius (miles)
 LIST_OFFSET_PX    = 12       # gap between cluster bbox and stacked list
-STACK_ROW_GAP_PX  = 40        # extra space between rows in a stack
+STACK_ROW_GAP_PX  = 400        # extra space between rows in a stack
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
