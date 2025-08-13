@@ -165,53 +165,56 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "solver-r3.5"
-
-    # --- CSS + footer badge (no f-strings; tokens replaced) ---
-badge_html = r"""
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
-<meta http-equiv="Pragma" content="no-cache"/>
-<meta http-equiv="Expires" content="0"/>
-<style>
-.leaflet-tooltip.iata-tt{
-  background: transparent; border: 0; box-shadow: none;
-  color: #6e6e6e;
-  font-family: "Open Sans","Helvetica Neue",Arial,sans-serif;
-  font-weight: 1000; font-size: 12px; letter-spacing: 0.5px;
-  text-transform: uppercase; white-space: nowrap;
-}
-.leaflet-tooltip-top:before,
-.leaflet-tooltip-bottom:before,
-.leaflet-tooltip-left:before,
-.leaflet-tooltip-right:before{ display:none !important; }
-.leaflet-tooltip.iata-tt .ttxt{ display:inline-block; transform:translate(0px,0px); will-change:transform; }
-.leaflet-control-layers-expanded{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }
-.last-updated {
-  position:absolute; right:12px; bottom:12px; z-index:9999;
-  background:#fff; padding:6px 8px; border-radius:8px;
-  box-shadow:0 2px 8px rgba(0,0,0,.12);
-  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
-}
-/* NEW: stacked cluster label */
-.iata-stack{
-  position:absolute; z-index:9998; pointer-events:none;
-  background:#fff; color:#485260;
-  border:1px solid rgba(0,0,0,.25); border-radius:8px;
-  padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
-  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
-}
-.iata-stack .row{ line-height:1.15; white-space:nowrap; }
-.iata-stack .dot{
-  display:inline-block; width:6px; height:6px; border-radius:50%;
-  margin-right:6px; border:1px solid rgba(0,0,0,.25);
-  transform: translateY(-1px);
-}
-</style>
-<div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
-"""
-
-    badge_html = badge_html.replace("__UPDATED__", updated).replace("__VER__", SOLVER_VER)
+    SOLVER_VER = "solver-r3.6-stacks"
+    
+    # --- CSS + footer badge (tokens replaced inline to avoid indent issues) ---
+    badge_html = (
+        r"""
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+    <meta http-equiv="Pragma" content="no-cache"/>
+    <meta http-equiv="Expires" content="0"/>
+    <style>
+    .leaflet-tooltip.iata-tt{
+      background: transparent; border: 0; box-shadow: none;
+      color: #6e6e6e;
+      font-family: "Open Sans","Helvetica Neue",Arial,sans-serif;
+      font-weight: 1000; font-size: 12px; letter-spacing: 0.5px;
+      text-transform: uppercase; white-space: nowrap;
+    }
+    .leaflet-tooltip-top:before,
+    .leaflet-tooltip-bottom:before,
+    .leaflet-tooltip-left:before,
+    .leaflet-tooltip-right:before{ display:none !important; }
+    .leaflet-tooltip.iata-tt .ttxt{ display:inline-block; transform:translate(0px,0px); will-change:transform; }
+    .leaflet-control-layers-expanded{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }
+    .last-updated {
+      position:absolute; right:12px; bottom:12px; z-index:9999;
+      background:#fff; padding:6px 8px; border-radius:8px;
+      box-shadow:0 2px 8px rgba(0,0,0,.12);
+      font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
+    }
+    /* stacked cluster label */
+    .iata-stack{
+      position:absolute; z-index:9998; pointer-events:none;
+      background:#fff; color:#485260;
+      border:1px solid rgba(0,0,0,.25); border-radius:8px;
+      padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
+      font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
+    }
+    .iata-stack .row{ line-height:1.15; white-space:nowrap; }
+    .iata-stack .dot{
+      display:inline-block; width:6px; height:6px; border-radius:50%;
+      margin-right:6px; border:1px solid rgba(0,0,0,.25);
+      transform: translateY(-1px);
+    }
+    </style>
+    <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
+    """
+        .replace("__UPDATED__", updated)
+        .replace("__VER__", SOLVER_VER)
+    )
     m.get_root().html.add_child(folium.Element(badge_html))
+
 
     # dots + permanent tooltips
     for _, r in amer.iterrows():
