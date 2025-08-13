@@ -433,35 +433,42 @@ def build_map() -> folium.Map:
       }
 
       // draw stack anchored at one member's label (topmost by y)
-      function drawStack(groupIdxs, items){
-        const div = document.createElement('div');
-        div.className = 'iata-stack';
+      // draw stack anchored at one member's label (topmost by y),
+        // then lift it upward so it hovers above the dot like a single label would.
+    function drawStack(groupIdxs, items){
+      const div = document.createElement('div');
+      div.className = 'iata-stack';
+    
+      // anchor = topmost label in the group
+      const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
+      const anchorIdx = sorted[0];
+      const anchor = items[anchorIdx];
+    
+      // rows: plain text like labels
+      sorted.forEach(i=>{
+        const r = document.createElement('div');
+        r.className = 'row';
+        r.textContent = items[i].iata;
+        div.appendChild(r);
+      });
+      pane.appendChild(div);
+    
+      // after layout: position at anchor.x and lift by (stackHeight - singleLineHeight)
+      requestAnimationFrame(()=>{
+        const stackRect = div.getBoundingClientRect();   // just to get height
+        const extraH = Math.max(0, stackRect.height - anchor.label.h);
+        const left = Math.round(anchor.label.x);         // pane-relative coords
+        const top  = Math.round(anchor.label.y - extraH);
+        div.style.left = left + "px";
+        div.style.top  = top  + "px";
+      });
+    
+      return {
+        anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
+        iatas: sorted.map(i=>items[i].iata)
+      };
+    }
 
-        // anchor = topmost label in the group
-        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
-        const anchorIdx = sorted[0];
-        const anchor = items[anchorIdx];
-
-        // rows: plain text like labels
-        sorted.forEach(i=>{
-          const r = document.createElement('div');
-          r.className = 'row';
-          r.textContent = items[i].iata;
-          div.appendChild(r);
-        });
-        pane.appendChild(div);
-
-        // place exactly where the anchor label is (top-left), after layout settles
-        requestAnimationFrame(()=>{
-          div.style.left = Math.round(anchor.label.x) + "px";
-          div.style.top  = Math.round(anchor.label.y) + "px";
-        });
-
-        return {
-          anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
-          iatas: sorted.map(i=>items[i].iata)
-        };
-      }
 
       function applyClustering(items){
         clearStacks();
