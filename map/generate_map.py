@@ -1,8 +1,8 @@
 # map/generate_map.py
-# Dots + labels + smooth zoom + position DB.
-# Stacks appear when zoomed OUT (z <= STACK_ON_AT_Z), clustered by ~30 miles (scaled to pixels).
-# At very low zoom (z < HIDE_LABELS_BELOW_Z) all labels are hidden.
-# Stacks anchor on one member label and look like normal labels (no bg/border).
+# Dots + labels + smooth zoom + simple position DB.
+# Stacks appear when zoomed OUT (z <= STACK_ON_AT_Z), grouped by ~30 miles (auto-scaled to px).
+# Anchored on one member's label, styled like normal labels.
+# Hide ALL labels at very low zoom (z < HIDE_LABELS_BELOW_Z).
 
 import io
 import json
@@ -47,11 +47,11 @@ UPDATE_DEBOUNCE_MS = 120   # debounce for move/zoom updates
 STACK_ON_AT_Z = 7.5        # stacks when z <= this (zoomed OUT). Tweak (e.g., 8.3)
 HIDE_LABELS_BELOW_Z = 5.7  # hide ALL labels when z < this; restore when z >= this
 
-# --- “30 miles” grouping (scaled to pixels each zoom) ---
-GROUP_RADIUS_MILES = 30.0  # world distance; converted to pixels per zoom automatically
+# --- Grouping distance in real-world miles (converted to pixels per zoom) ---
+GROUP_RADIUS_MILES = 30.0  # ~30 miles
 
 # --- Visual tweak for stacked rows ---
-STACK_ROW_GAP_PX = 6       # spacing between rows in a stack (labels-only style)
+STACK_ROW_GAP_PX = 6       # spacing between rows in stack (visual)
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -93,14 +93,9 @@ def fetch_aca_html(timeout: int = 45) -> str:
 
 def parse_aca_table(html: str) -> pd.DataFrame:
     """Return dataframe with: iata, airport, country, region, aca_level, region4."""
-    # Use lxml if available; fall back to html.parser to avoid runtime failures.
-    soup = None
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
-
+    soup = BeautifulSoup(html, "lxml")
     dfs = []
+
     table = soup.select_one(".airports-listview table")
     if table is not None:
         try:
@@ -184,7 +179,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.5-zoom+posdb+stack-out+miles"
+    BUILD_VER = "base-r1.6-zoom+posdb+stack-out+miles"
 
     # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
@@ -286,9 +281,10 @@ def build_map() -> folium.Map:
     const DB_MAX_HISTORY = __DB_MAX_HISTORY__;
     const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
 
+    // behavior
     const STACK_ON_AT_Z = __STACK_ON_AT_Z__;              // stacks when z <= this
-    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__;  # hide all labels when z < this
-    const GROUP_RADIUS_MILES = __GROUP_RADIUS_MILES__;     // world miles, scaled to px per zoom
+    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__;  // hide all labels when z < this
+    const GROUP_RADIUS_MILES = __GROUP_RADIUS_MILES__;     // miles, scaled to px per zoom
 
     // snapshot DB
     window.ACA_DB = window.ACA_DB || { latest:null, history:[] };
@@ -459,7 +455,7 @@ def build_map() -> folium.Map:
         pane.appendChild(div);
 
         // place exactly where the anchor label is (top-left)
-        // re-measure next frame to be *sure* after DOM/layout settles
+        // re-measure next frame to be sure after DOM/layout settles
         requestAnimationFrame(()=>{
           div.style.left = Math.round(anchor.label.x) + "px";
           div.style.top  = Math.round(anchor.label.y) + "px";
@@ -517,18 +513,18 @@ def build_map() -> folium.Map:
         };
       }
 
-      // --- update cycle (run *after* zoom settles to avoid mis-placement) ---
+      // --- update cycle (after zoom settles) ---
       let tmr = null;
       function updateAll(){
         updateMeter();
-        // double RAF: wait for Leaflet/DOM to settle post-zoom
+        // Double RAF: wait for Leaflet to finish placing layers/labels after zoom.
         requestAnimationFrame(()=>requestAnimationFrame(()=>{
           const items = collectItems();
           const { stacks } = applyClustering(items);
           pushSnapshot(buildSnapshot(items, stacks));
         }));
       }
-      function scheduleSettledUpdate(){
+      function scheduleUpdate(){
         if (tmr) clearTimeout(tmr);
         tmr = setTimeout(updateAll, UPDATE_DEBOUNCE_MS);
       }
@@ -536,11 +532,11 @@ def build_map() -> folium.Map:
       if (map.whenReady) map.whenReady(updateAll);
       updateMeter();
 
-      // Keep meter responsive during zoom animation
+      // Keep meter snappy while zooming
       map.on('zoom', updateMeter);
 
-      // Recompute only when motion/zoom is finished (prevents stale anchors)
-      map.on('zoomend moveend layeradd layerremove overlayadd overlayremove', scheduleSettledUpdate);
+      // Compute positions/clusters only when motion/zoom finishes
+      map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
 
       const snap = window.ACA_DB.get();
       if (snap){
