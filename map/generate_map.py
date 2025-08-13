@@ -31,22 +31,33 @@ STROKE = 2
 
 LABEL_GAP_PX = 10
 SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
-PAD_PX = 12                                    # ↑ makes overlap detection a bit more sensitive
+PAD_PX = 12                                   # overlap sensitivity for solver collisions
 
 # Placement solver knobs
 DRIFT_PX = 40     # max label drift from dot (px)
 ITERS = 40        # relaxation iterations
 FSTEP = 0.50      # solver step
 
-EXT_FRACTION = 0.01  # ~20% of zoom range for “extended keep”
+EXT_FRACTION = 0.01  # fraction of zoom range for “extended keep”
 
-# --- NEW behavior knobs (you can tweak these) ---
-DOT_HIDE_BELOW_Z = 4         # hide all DOTS (not labels) when zoom < this
-ALIGN_LEFT_AT_Z   = 12        # when zoom <= this, stacks anchor LEFT of cluster bbox
-STACK_R_PX        = 100       # screen-pixel proximity that triggers stacking
-NEAR_MILES        = 100       # “same city” clustering radius (miles)
-LIST_OFFSET_PX    = 12       # gap between cluster bbox and stacked list
-STACK_ROW_GAP_PX  = 400        # extra space between rows in a stack
+# --- Behavior knobs (tweak freely) ---
+DOT_HIDE_BELOW_Z   = 4     # hide DOTS when zoom < this (labels independent of this)
+ALIGN_LEFT_AT_Z    = 12    # stacks anchor LEFT when zoom <= this
+STACK_R_PX         = 100   # screen-pixel proximity that triggers stacking
+NEAR_MILES         = 100   # “same city” clustering radius (miles)
+LIST_OFFSET_PX     = 12    # gap between cluster bbox and stacked list
+STACK_ROW_GAP_PX   = 8     # extra space between rows in a stack
+
+# NEW: hide LABELS (tooltips & stacks) outside these zoom ranges.
+# Set to -1 to disable the bound. Example: hide labels when zoom < 4 -> BELOW=4, ABOVE=-1.
+LABEL_HIDE_BELOW_Z = 4
+LABEL_HIDE_ABOVE_Z = -1
+
+# NEW: smooth, fine-grained wheel zoom
+ZOOM_SNAP = 0.10           # allow fractional zoom (smaller = finer)
+ZOOM_DELTA = 0.25          # keyboard +/- step
+WHEEL_PX_PER_ZOOM = 220    # higher => smaller change per wheel tick
+WHEEL_DEBOUNCE_MS = 15     # lower => more responsive wheel
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -174,9 +185,9 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "solver-r3.7-stacks+city+hide"
+    SOLVER_VER = "solver-r3.8-stacks+city+hide+meter+smooth"
 
-    # --- CSS + footer badge (tokens replaced inline) ---
+    # --- CSS + footer badge + zoom meter (tokens replaced inline) ---
     badge_html = (
         r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -216,8 +227,17 @@ def build_map() -> folium.Map:
   margin-right:6px; border:1px solid rgba(0,0,0,.25);
   transform: translateY(-1px);
 }
+/* zoom meter (top-left) */
+.zoom-meter{
+  position:absolute; left:12px; top:12px; z-index:9999;
+  background:#fff; padding:6px 8px; border-radius:8px;
+  box-shadow:0 2px 8px rgba(0,0,0,.12);
+  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
+  user-select:none; pointer-events:none;
+}
 </style>
 <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
+<div id="zoomMeter" class="zoom-meter">Zoom: --%</div>
 """
         .replace("__UPDATED__", updated)
         .replace("__VER__", SOLVER_VER)
@@ -261,11 +281,11 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: relaxation + stacked lists + city clustering + dot hiding (no <script> tags) ---
+    # --- JS: relaxation + stacked lists + city clustering + dot/label hiding + zoom meter + smooth wheel ---
     js = r"""
 (function(){
   try {
-    console.debug("[ACA] solver r3.7-stacks+city+hide start");
+    console.debug("[ACA] solver r3.8 start");
 
     const MAP = __MAP__;
     const SHOWZ = __SHOWZ__;
@@ -277,12 +297,20 @@ def build_map() -> folium.Map:
     const FSTEP = __FSTEP__;
 
     // behavior/stack knobs
-    const DOT_HIDE_Z   = __DOT_HIDE_Z__;
-    const ALIGN_LEFT_Z = __ALIGN_LEFT_Z__;
-    const STACK_R      = __STACK_R__;
-    const LIST_OFFSET  = __LIST_OFFSET__;
-    const NEAR_MILES   = __NEAR_MILES__;
-    const ROW_GAP      = __ROW_GAP__;
+    const DOT_HIDE_Z      = __DOT_HIDE_Z__;
+    const ALIGN_LEFT_Z    = __ALIGN_LEFT_Z__;
+    const STACK_R         = __STACK_R__;
+    const LIST_OFFSET     = __LIST_OFFSET__;
+    const NEAR_MILES      = __NEAR_MILES__;
+    const ROW_GAP         = __ROW_GAP__;
+    const LABEL_HIDE_BELOW= __LABEL_HIDE_BELOW__;
+    const LABEL_HIDE_ABOVE= __LABEL_HIDE_ABOVE__;
+
+    // smooth wheel zoom knobs
+    const ZOOM_SNAP = __ZOOM_SNAP__;
+    const ZOOM_DELTA = __ZOOM_DELTA__;
+    const WHEEL_PX = __WHEEL_PX__;
+    const WHEEL_DEBOUNCE = __WHEEL_DEBOUNCE__;
 
     function until(cond, cb, tries=80, delay=100){
       (function tick(n){
@@ -300,7 +328,33 @@ def build_map() -> folium.Map:
 
     function init(){
       const map = MAP;
-      console.debug("[ACA] solver r3.7 init on", map);
+
+      // fine-grained, smooth wheel zoom
+      function tuneWheel(){
+        map.options.zoomSnap = ZOOM_SNAP;
+        map.options.zoomDelta = ZOOM_DELTA;
+        map.options.wheelPxPerZoomLevel = WHEEL_PX;
+        map.options.wheelDebounceTime = WHEEL_DEBOUNCE;
+        if (map.scrollWheelZoom){
+          map.scrollWheelZoom.disable();
+          map.scrollWheelZoom.enable();
+        }
+      }
+      tuneWheel();
+
+      // zoom meter
+      const meter = document.getElementById('zoomMeter');
+      function updateMeter(){
+        if (!meter) return;
+        const z = map.getZoom();
+        const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
+        let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
+        if (maxZ == null) maxZ = 19;
+        const pct = Math.round( ( (z - minZ) / Math.max(1e-6, (maxZ - minZ)) ) * 100 );
+        meter.textContent = "Zoom: " + pct + "% (z=" + z.toFixed(2) + ")";
+      }
+      map.on('zoom', updateMeter);
+      map.whenReady(updateMeter);
 
       function getContainer(){ return map.getContainer(); }
       function rectBase(){
@@ -407,9 +461,6 @@ def build_map() -> folium.Map:
             const screenClose = (dx*dx + dy*dy) <= (STACK_R*STACK_R);
             const geoClose = map.distance(items[i].latlng, items[j].latlng) <= nearMeters;
 
-            // If labels still overlap, always union.
-            // If "same city" (<= 50mi) and we're zoomed out enough (<= ALIGN_LEFT_Z),
-            // union even if labels don't overlap so we get a tidy left-justified list.
             const stillOverlap = overlaps(finals[i], finals[j], PAD);
             if (stillOverlap || (geoClose && z <= ALIGN_LEFT_Z) || (screenClose && stillOverlap)){
               uni(i,j);
@@ -475,7 +526,6 @@ def build_map() -> folium.Map:
           x = Math.round(minX - LIST_OFFSET - width);
         }else{
           x = Math.round(maxX + LIST_OFFSET);
-          // if off right edge, place left
           if (x + width > mapW - 2) {
             x = Math.round(minX - LIST_OFFSET - width);
           }
@@ -514,7 +564,17 @@ def build_map() -> folium.Map:
         clearStacks();
 
         const z = map.getZoom();
-        hideOrShowDots(items, z); // NEW: dot visibility by zoom
+        hideOrShowDots(items, z); // dot visibility by zoom
+
+        // global label hide (independent of size gates)
+        const hideLabelsGlobally =
+          ((LABEL_HIDE_BELOW >= 0 && z < LABEL_HIDE_BELOW) ||
+           (LABEL_HIDE_ABOVE >= 0 && z > LABEL_HIDE_ABOVE));
+
+        if (hideLabelsGlobally){
+          items.forEach(it => { it.el.style.display = 'none'; });
+          return; // skip all label work (no stacks either)
+        }
 
         const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
         let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
@@ -623,7 +683,7 @@ def build_map() -> folium.Map:
       }
     }
   } catch (err) {
-    console.error("[ACA] solver r3.7-stacks+city+hide crashed:", err);
+    console.error("[ACA] solver r3.8 crashed:", err);
   }
 })();
 """
@@ -643,6 +703,12 @@ def build_map() -> folium.Map:
           .replace("__LIST_OFFSET__", str(int(LIST_OFFSET_PX)))
           .replace("__NEAR_MILES__", str(float(NEAR_MILES)))
           .replace("__ROW_GAP__", str(int(STACK_ROW_GAP_PX)))
+          .replace("__LABEL_HIDE_BELOW__", str(int(LABEL_HIDE_BELOW_Z)))
+          .replace("__LABEL_HIDE_ABOVE__", str(int(LABEL_HIDE_ABOVE_Z)))
+          .replace("__ZOOM_SNAP__", str(float(ZOOM_SNAP)))
+          .replace("__ZOOM_DELTA__", str(float(ZOOM_DELTA)))
+          .replace("__WHEEL_PX__", str(int(WHEEL_PX_PER_ZOOM)))
+          .replace("__WHEEL_DEBOUNCE__", str(int(WHEEL_DEBOUNCE_MS)))
           )
 
     m.get_root().script.add_child(folium.Element(js))
