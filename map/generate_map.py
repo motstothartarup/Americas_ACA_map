@@ -1,7 +1,8 @@
 # map/generate_map.py
-# Dots + labels + smooth zoom + simple position DB.
-# Stacks appear when zoomed OUT (z <= STACK_ON_AT_Z), clustered by screen pixels,
-# anchored on one member's label, and styled like normal labels.
+# Dots + labels + smooth zoom + position DB.
+# Stacks appear when zoomed OUT (z <= STACK_ON_AT_Z), clustered by ~30 miles (scaled to pixels).
+# At very low zoom (z < HIDE_LABELS_BELOW_Z) all labels are hidden.
+# Stacks anchor on one member label and look like normal labels (no bg/border).
 
 import io
 import json
@@ -42,10 +43,12 @@ WHEEL_DEBOUNCE_MS = 15     # smaller = more responsive wheel
 DB_MAX_HISTORY = 200       # keep last N snapshots
 UPDATE_DEBOUNCE_MS = 120   # debounce for move/zoom updates
 
-# --- Simple cluster stacker knobs (screen-pixel based) ---
-STACK_ON_AT_Z = 7.5        # ✅ stacks when z <= this (zoomed OUT). Tweak to 8.3 etc.
-CLUSTER_R_PX  = 120        # pixel proximity radius (your "60-mile" knob; purely screen-space)
-STACK_ROW_GAP_PX = 6       # spacing between rows in stack (visual)
+# --- Stacking behavior ---
+STACK_ON_AT_Z = 7.5        # stacks when z <= this (zoomed OUT). Tweak (e.g., 8.3)
+HIDE_LABELS_BELOW_Z = 5.7  # hide ALL labels when z < this; restore when z >= this
+
+# --- “30 miles” grouping (scaled to pixels each zoom) ---
+GROUP_RADIUS_MILES = 30.0  # world distance; converted to pixels per zoom automatically
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -173,7 +176,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.2-zoom+posdb+stack-out"
+    BUILD_VER = "base-r1.3-zoom+posdb+stack-out+miles"
 
     # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
@@ -263,7 +266,7 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: smooth zoom + zoom meter + position DB + stacks on zoom-out ---
+    # --- JS: smooth zoom + zoom meter + position DB + stacks on zoom-out + miles->px scaling ---
     js = r"""
 (function(){
   try {
@@ -275,9 +278,9 @@ def build_map() -> folium.Map:
     const DB_MAX_HISTORY = __DB_MAX_HISTORY__;
     const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
 
-    // stacks when zoomed OUT: z <= STACK_ON_AT_Z
-    const STACK_ON_AT_Z = __STACK_ON_AT_Z__;
-    const CLUSTER_R_PX  = __CLUSTER_R_PX__;
+    const STACK_ON_AT_Z = __STACK_ON_AT_Z__;     // stacks when z <= this
+    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__; // hide all when z < this
+    const GROUP_RADIUS_MILES = __GROUP_RADIUS_MILES__;
 
     // snapshot DB
     window.ACA_DB = window.ACA_DB || { latest:null, history:[] };
@@ -351,12 +354,28 @@ def build_map() -> folium.Map:
         if (!pane) return;
         pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = ''; });
       }
+      function hideAllLabels(){
+        if (!pane) return;
+        pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = 'none'; });
+      }
       function clearStacks(){
         if (!pane) return;
         pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
       }
 
-      // collect label/dot items
+      // miles -> pixels at current zoom (approx at map center, horizontal)
+      function milesToPixels(miles){
+        const meters = miles * 1609.344;
+        const center = map.getCenter();
+        const p1 = map.latLngToContainerPoint(center);
+        const p2 = L.point(p1.x + 100, p1.y);
+        const ll2 = map.containerPointToLatLng(p2);
+        const metersPer100px = map.distance(center, ll2);
+        const pxPerMeter = 100 / Math.max(1e-6, metersPer100px);
+        return meters * pxPerMeter;
+      }
+
+      // collect label/dot items (ensure current positions)
       function collectItems(){
         const rect = rectBase();
         const items = [];
@@ -389,13 +408,13 @@ def build_map() -> folium.Map:
         return items;
       }
 
-      // cluster by screen pixels (union-find)
-      function buildClusters(items){
+      // cluster by screen pixels (union-find), radius derived from miles
+      function buildClusters(items, radiusPx){
         const n = items.length;
         const parent = Array.from({length:n}, (_,i)=>i);
         function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
         function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
-        const R2 = CLUSTER_R_PX * CLUSTER_R_PX;
+        const R2 = radiusPx * radiusPx;
         for (let i=0;i<n;i++){
           for (let j=i+1;j<n;j++){
             const dx = items[i].dot.x - items[j].dot.x;
@@ -412,32 +431,35 @@ def build_map() -> folium.Map:
         return Array.from(groups.values()).filter(g => g.length >= 2);
       }
 
-      // draw stack anchored at one member's label (topmost)
+      // draw stack anchored at one member's label (topmost by y)
       function drawStack(groupIdxs, items){
         const div = document.createElement('div');
         div.className = 'iata-stack';
 
-        // choose anchor = topmost label in the group
-        const anchorIdx = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y)[0];
+        // anchor = topmost label in the group
+        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
+        const anchorIdx = sorted[0];
         const anchor = items[anchorIdx];
 
-        // rows: simple text like labels
-        const rows = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
-        rows.forEach(i=>{
-            const r = document.createElement('div');
-            r.className = 'row';
-            r.textContent = items[i].iata;
-            div.appendChild(r);
+        // rows: plain text like labels
+        sorted.forEach(i=>{
+          const r = document.createElement('div');
+          r.className = 'row';
+          r.textContent = items[i].iata;
+          div.appendChild(r);
         });
         pane.appendChild(div);
 
-        // place exactly where the anchor label would be (top-left)
-        div.style.left = Math.round(anchor.label.x) + "px";
-        div.style.top  = Math.round(anchor.label.y) + "px";
+        // place exactly where the anchor label is (top-left)
+        // re-measure next frame to be *sure* after DOM/layout settles
+        requestAnimationFrame(()=>{
+          div.style.left = Math.round(anchor.label.x) + "px";
+          div.style.top  = Math.round(anchor.label.y) + "px";
+        });
 
         return {
           anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
-          iatas: rows.map(i=>items[i].iata)
+          iatas: sorted.map(i=>items[i].iata)
         };
       }
 
@@ -446,18 +468,27 @@ def build_map() -> folium.Map:
         showAllLabels();
 
         const z = map.getZoom();
-        if (z > STACK_ON_AT_Z) return { stacks: [], hidden: [] }; // only when zoomed OUT
 
-        const clusters = buildClusters(items);
+        // global hide at very low zoom
+        if (z < HIDE_LABELS_BELOW_Z){
+          hideAllLabels();
+          return { stacks: [], hidden: [], hiddenAll:true };
+        }
+
+        // only stack when zoomed OUT enough
+        if (z > STACK_ON_AT_Z) return { stacks: [], hidden: [], hiddenAll:false };
+
+        const radiusPx = milesToPixels(GROUP_RADIUS_MILES);  // scales with zoom
+        const clusters = buildClusters(items, radiusPx);
         const hidden = [];
         const stacks = [];
         clusters.forEach(g=>{
           // hide member labels
           g.forEach(i=>{ items[i].el.style.display = 'none'; hidden.push(items[i].iata); });
-          // draw stack anchored at one member
+          // draw stack anchored at a member
           stacks.push(drawStack(g, items));
         });
-        return { stacks, hidden };
+        return { stacks, hidden, hiddenAll:false };
       }
 
       function buildSnapshot(items, stacks){
@@ -478,24 +509,30 @@ def build_map() -> folium.Map:
         };
       }
 
-      // update cycle
+      // --- update cycle (run *after* zoom settles to avoid mis-placement) ---
       let tmr = null;
       function updateAll(){
         updateMeter();
-        const items = collectItems();
-        const { stacks } = applyClustering(items);
-        pushSnapshot(buildSnapshot(items, stacks));
+        // double RAF: wait for Leaflet/DOM to settle post-zoom
+        requestAnimationFrame(()=>requestAnimationFrame(()=>{
+          const items = collectItems();
+          const { stacks } = applyClustering(items);
+          pushSnapshot(buildSnapshot(items, stacks));
+        }));
       }
-      function scheduleUpdate(){
+      function scheduleSettledUpdate(){
         if (tmr) clearTimeout(tmr);
-        tmr = setTimeout(updateAll, __UPDATE_DEBOUNCE_MS__);
+        tmr = setTimeout(updateAll, UPDATE_DEBOUNCE_MS);
       }
 
       if (map.whenReady) map.whenReady(updateAll);
       updateMeter();
 
-      map.on('zoom zoomend', updateMeter);
-      map.on('move moveend zoom zoomend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
+      // Keep meter responsive during zoom animation
+      map.on('zoom', updateMeter);
+
+      // Recompute only when motion/zoom is finished (prevents stale anchors)
+      map.on('zoomend moveend layeradd layerremove overlayadd overlayremove', scheduleSettledUpdate);
 
       const snap = window.ACA_DB.get();
       if (snap){
@@ -517,7 +554,8 @@ def build_map() -> folium.Map:
           .replace("__DB_MAX_HISTORY__", str(int(DB_MAX_HISTORY)))
           .replace("__UPDATE_DEBOUNCE_MS__", str(int(UPDATE_DEBOUNCE_MS)))
           .replace("__STACK_ON_AT_Z__", str(float(STACK_ON_AT_Z)))
-          .replace("__CLUSTER_R_PX__", str(int(CLUSTER_R_PX)))
+          .replace("__HIDE_LABELS_BELOW_Z__", str(float(HIDE_LABELS_BELOW_Z)))
+          .replace("__GROUP_RADIUS_MILES__", str(float(GROUP_RADIUS_MILES)))
     )
 
     m.get_root().script.add_child(folium.Element(js))
