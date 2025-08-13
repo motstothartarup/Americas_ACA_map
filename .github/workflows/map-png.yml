@@ -1,0 +1,52 @@
+name: Build daily PNG of ACA map
+
+on:
+  schedule:
+    - cron: "0 9 * * *"   # every day at 09:00 UTC
+  workflow_dispatch:      # allow manual run
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install folium pandas requests beautifulsoup4 lxml
+
+      - name: Build HTML
+        run: python map/generate_map.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Puppeteer
+        run: npm i puppeteer@22
+
+      - name: Render PNG
+        env:
+          PNG_W: "2400"        # tweak if you want
+          PNG_H: "1600"
+          PNG_SCALE: "2"
+        run: node scripts/screenshot.js
+
+      - name: Commit PNG and HTML
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: daily ACA map PNG"
+          file_pattern: |
+            docs/index.html
+            docs/aca_map.png
