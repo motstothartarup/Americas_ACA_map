@@ -5,6 +5,10 @@ const path = require("path");
 const fs = require("fs");
 const puppeteer = require("puppeteer");
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 (async () => {
   const repoRoot = path.resolve(__dirname, "..");
   const input = path.join(repoRoot, "docs", "index.html");
@@ -21,6 +25,7 @@ const puppeteer = require("puppeteer");
   const SCALE  = parseFloat(process.env.PNG_SCALE || "2"); // deviceScaleFactor
 
   const browser = await puppeteer.launch({
+    headless: true,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -35,27 +40,36 @@ const puppeteer = require("puppeteer");
 
     await page.goto(url, { waitUntil: "load", timeout: 120000 });
 
-    // Wait for Leaflet to build + our JS to run once:
+    // Wait for Leaflet to mount
     await page.waitForSelector(".leaflet-container", { timeout: 60000 });
-    // Tiles + our position DB initialized:
+
+    // Wait until our map JS has produced at least one label and ACA_DB has a snapshot
     await page.waitForFunction(
       () =>
         window.ACA_DB &&
         window.ACA_DB.latest &&
-        document.querySelectorAll(".leaflet-tile-loaded").length > 20,
+        document.querySelectorAll(".iata-tt").length > 0,
       { timeout: 60000 }
     );
 
-    // Give stacks a moment to settle after zoom/fitBounds:
-    await page.waitForTimeout(600);
+    // Ensure tiles are loaded (as best-effort)
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll(".leaflet-tile"))
+                 .every((img) => img.complete),
+      { timeout: 60000 }
+    );
+
+    // Give stacks a moment to settle after zoom/fitBounds
+    await sleep(600);
+
+    // Nudge layout once more (helps some runners)
+    await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+    await sleep(100);
 
     const mapEl = await page.$(".leaflet-container");
     if (!mapEl) throw new Error("Leaflet map element not found.");
 
-    await mapEl.screenshot({
-      path: output,
-      // omitBackground keeps the Positron tiles; don't set transparent
-    });
+    await mapEl.screenshot({ path: output });
 
     console.log("Wrote", output);
   } catch (e) {
