@@ -1,6 +1,7 @@
 # map/generate_map.py
 # Dots + labels + smooth zoom + simple position DB.
-# NEW: thresholded cluster stacks (pixel-based) at high zoom.
+# Stacks appear when zoomed OUT (z <= STACK_ON_AT_Z), clustered by screen pixels,
+# anchored on one member's label, and styled like normal labels.
 
 import io
 import json
@@ -42,10 +43,9 @@ DB_MAX_HISTORY = 200       # keep last N snapshots
 UPDATE_DEBOUNCE_MS = 120   # debounce for move/zoom updates
 
 # --- Simple cluster stacker knobs (screen-pixel based) ---
-STACK_ON_AT_Z = 8.3        # start stacking at/above this Leaflet zoom
-CLUSTER_R_PX = 120         # proximity radius in screen pixels (≈ your “60mi”—tune freely)
-STACK_LIST_OFFSET_PX = 10  # vertical gap above cluster center
-STACK_ROW_GAP_PX = 6       # spacing between rows in stack
+STACK_ON_AT_Z = 7.5        # ✅ stacks when z <= this (zoomed OUT). Tweak to 8.3 etc.
+CLUSTER_R_PX  = 120        # pixel proximity radius (your "60-mile" knob; purely screen-space)
+STACK_ROW_GAP_PX = 6       # spacing between rows in stack (visual)
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -173,9 +173,9 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.1-zoom+posdb+stack"
+    BUILD_VER = "base-r1.2-zoom+posdb+stack-out"
 
-    # --- CSS + footer badge + zoom meter + stack styles ---
+    # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
         r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -208,20 +208,15 @@ def build_map() -> folium.Map:
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
   user-select:none; pointer-events:none;
 }
-/* simple stack list (left-justified text) */
+/* Stack list styled like labels (no bg/border/shadow) */
 .iata-stack{
   position:absolute; z-index:9998; pointer-events:none;
-  background:#fff; color:#485260; text-align:left;
-  border:1px solid rgba(0,0,0,.25); border-radius:8px;
-  padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
+  background:transparent; border:0; box-shadow:none;
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
+  color:#6e6e6e; letter-spacing:0.5px; text-transform:uppercase;
+  font-weight:1000; text-align:left; white-space:nowrap;
 }
-.iata-stack .row{ line-height:1.30; white-space:nowrap; margin: __ROWGAP__px 0; }
-.iata-stack .dot{
-  display:inline-block; width:6px; height:6px; border-radius:50%;
-  margin-right:6px; border:1px solid rgba(0,0,0,.25);
-  transform: translateY(-1px);
-}
+.iata-stack .row{ line-height:1.0; margin: __ROWGAP__px 0; }
 </style>
 <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
 <div id="zoomMeter" class="zoom-meter">Zoom: --%</div>
@@ -268,11 +263,10 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: smooth zoom + zoom meter + position DB + simple pixel-based stacks ---
+    # --- JS: smooth zoom + zoom meter + position DB + stacks on zoom-out ---
     js = r"""
 (function(){
   try {
-    // Map + knobs
     const MAP_NAME = "__MAP_NAME__";
     const ZOOM_SNAP = __ZOOM_SNAP__;
     const ZOOM_DELTA = __ZOOM_DELTA__;
@@ -281,11 +275,11 @@ def build_map() -> folium.Map:
     const DB_MAX_HISTORY = __DB_MAX_HISTORY__;
     const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
 
+    // stacks when zoomed OUT: z <= STACK_ON_AT_Z
     const STACK_ON_AT_Z = __STACK_ON_AT_Z__;
     const CLUSTER_R_PX  = __CLUSTER_R_PX__;
-    const STACK_LIST_OFFSET_PX = __STACK_LIST_OFFSET_PX__;
 
-    // Small DB for snapshots
+    // snapshot DB
     window.ACA_DB = window.ACA_DB || { latest:null, history:[] };
     function pushSnapshot(snap){
       window.ACA_DB.latest = snap;
@@ -298,58 +292,47 @@ def build_map() -> folium.Map:
     window.ACA_DB.export = function(){ try { return JSON.stringify(window.ACA_DB.latest, null, 2); } catch(e){ return "{}"; } };
 
     function until(cond, cb, tries=200, delay=50){
-      (function tick(n){
-        if (cond()) return cb();
-        if (n<=0) return;
-        setTimeout(()=>tick(n-1), delay);
-      })(tries);
+      (function tick(n){ if(cond()) return cb(); if(n<=0) return; setTimeout(()=>tick(n-1), delay); })(tries);
     }
 
-    until(
-      ()=> typeof window[MAP_NAME] !== "undefined" &&
-          window[MAP_NAME] &&
-          window[MAP_NAME].getPanes &&
-          window[MAP_NAME].getContainer,
-      init,
-      200, 50
-    );
+    until(()=> typeof window[MAP_NAME] !== "undefined" &&
+             window[MAP_NAME] &&
+             window[MAP_NAME].getPanes &&
+             window[MAP_NAME].getContainer,
+          init, 200, 50);
 
     function init(){
-      const map = window[MAP_NAME];
+      const map  = window[MAP_NAME];
       const pane = map.getPanes().tooltipPane;
 
-      // ---- Smooth, fine-grained wheel zoom ----
+      // smooth wheel zoom
       function tuneWheel(){
         map.options.zoomSnap = ZOOM_SNAP;
         map.options.zoomDelta = ZOOM_DELTA;
         map.options.wheelPxPerZoomLevel = WHEEL_PX;
-        map.options.wheelDebounceTime = WHEEL_DEBOUNCE;
-        if (map.scrollWheelZoom){
-          map.scrollWheelZoom.disable();
-          map.scrollWheelZoom.enable();
-        }
+        map.options.wheelDebounceTime   = WHEEL_DEBOUNCE;
+        if (map.scrollWheelZoom){ map.scrollWheelZoom.disable(); map.scrollWheelZoom.enable(); }
       }
       tuneWheel();
 
-      // ---- Zoom meter ----
+      // zoom meter
       const meter = document.getElementById('zoomMeter');
       function updateMeter(){
         if (!meter) return;
         const z = map.getZoom();
-        const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
-        let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
-        if (maxZ == null) maxZ = 19;
-        const pct = Math.round( ( (z - minZ) / Math.max(1e-6, (maxZ - minZ)) ) * 100 );
+        const minZ = (map.getMinZoom && map.getMinZoom()) || 0;
+        let maxZ = (map.getMaxZoom && map.getMaxZoom()); if (maxZ == null) maxZ = 19;
+        const pct = Math.round(((z - minZ)/Math.max(1e-6, (maxZ - minZ))) * 100);
         meter.textContent = "Zoom: " + pct + "% (z=" + z.toFixed(2) + ")";
       }
 
-      // ---- Geometry helpers ----
+      // helpers
       function getContainer(){ return map.getContainer(); }
       function rectBase(){
         const crect = getContainer().getBoundingClientRect();
         return function rect(el){
           const r = el.getBoundingClientRect();
-          return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
+          return { x:r.left - crect.left, y:r.top - crect.top, w:r.width, h:r.height };
         };
       }
       function ensureWrap(el){
@@ -366,14 +349,14 @@ def build_map() -> folium.Map:
       }
       function showAllLabels(){
         if (!pane) return;
-        pane.querySelectorAll('.iata-tt').forEach(el=>{ el.style.display = ''; });
+        pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = ''; });
       }
       function clearStacks(){
         if (!pane) return;
         pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
       }
 
-      // ---- Collect all items (labels are made visible for measurement) ----
+      // collect label/dot items
       function collectItems(){
         const rect = rectBase();
         const items = [];
@@ -406,94 +389,77 @@ def build_map() -> folium.Map:
         return items;
       }
 
-      // ---- Build pixel clusters (union-find) ----
+      // cluster by screen pixels (union-find)
       function buildClusters(items){
         const n = items.length;
         const parent = Array.from({length:n}, (_,i)=>i);
         function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
         function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
         const R2 = CLUSTER_R_PX * CLUSTER_R_PX;
-
-        for(let i=0;i<n;i++){
-          for(let j=i+1;j<n;j++){
+        for (let i=0;i<n;i++){
+          for (let j=i+1;j<n;j++){
             const dx = items[i].dot.x - items[j].dot.x;
             const dy = items[i].dot.y - items[j].dot.y;
             if (dx*dx + dy*dy <= R2) uni(i,j);
           }
         }
         const groups = new Map();
-        for(let i=0;i<n;i++){
+        for (let i=0;i<n;i++){
           const r = find(i);
-          if(!groups.has(r)) groups.set(r, []);
+          if (!groups.has(r)) groups.set(r, []);
           groups.get(r).push(i);
         }
         return Array.from(groups.values()).filter(g => g.length >= 2);
       }
 
-      // ---- Draw a left-justified stack centered horizontally at cluster center, above by offset ----
+      // draw stack anchored at one member's label (topmost)
       function drawStack(groupIdxs, items){
         const div = document.createElement('div');
         div.className = 'iata-stack';
 
-        // sort rows by y to get a stable list
+        // choose anchor = topmost label in the group
+        const anchorIdx = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y)[0];
+        const anchor = items[anchorIdx];
+
+        // rows: simple text like labels
         const rows = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
         rows.forEach(i=>{
-          const r = document.createElement('div');
-          r.className = 'row';
-          const dot = document.createElement('span');
-          dot.className = 'dot';
-          dot.style.background = items[i].color;
-          const t = document.createElement('span');
-          t.textContent = items[i].iata;
-          r.appendChild(dot); r.appendChild(t);
-          div.appendChild(r);
+            const r = document.createElement('div');
+            r.className = 'row';
+            r.textContent = items[i].iata;
+            div.appendChild(r);
         });
         pane.appendChild(div);
 
-        // centroid of dot screen points
-        let cx=0, cy=0;
-        groupIdxs.forEach(i=>{ cx += items[i].dot.x; cy += items[i].dot.y; });
-        cx /= groupIdxs.length; cy /= groupIdxs.length;
-
-        const w = div.getBoundingClientRect().width;
-        const h = div.getBoundingClientRect().height;
-
-        const left = Math.round(cx - w/2);
-        const top  = Math.round(cy - h - STACK_LIST_OFFSET_PX);
-
-        div.style.left = left + "px";
-        div.style.top  = top  + "px";
+        // place exactly where the anchor label would be (top-left)
+        div.style.left = Math.round(anchor.label.x) + "px";
+        div.style.top  = Math.round(anchor.label.y) + "px";
 
         return {
-          center: { x: cx, y: cy },
-          box: { left, top, width: w, height: h },
-          iatas: groupIdxs.map(i=>items[i].iata)
+          anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
+          iatas: rows.map(i=>items[i].iata)
         };
       }
 
-      // ---- Apply (or clear) clustering based on zoom ----
       function applyClustering(items){
         clearStacks();
         showAllLabels();
 
         const z = map.getZoom();
-        if (z < STACK_ON_AT_Z) return { stacks: [], hidden: [] };
+        if (z > STACK_ON_AT_Z) return { stacks: [], hidden: [] }; // only when zoomed OUT
 
         const clusters = buildClusters(items);
         const hidden = [];
         const stacks = [];
-
         clusters.forEach(g=>{
-          // hide the individual labels for members of this cluster
+          // hide member labels
           g.forEach(i=>{ items[i].el.style.display = 'none'; hidden.push(items[i].iata); });
-          // draw stack above the cluster center
+          // draw stack anchored at one member
           stacks.push(drawStack(g, items));
         });
-
         return { stacks, hidden };
       }
 
-      // ---- Snapshot builder ----
       function buildSnapshot(items, stacks){
         const now = new Date().toISOString();
         const z = map.getZoom();
@@ -508,11 +474,11 @@ def build_map() -> folium.Map:
             iata: it.iata, size: it.size, color: it.color,
             dot: it.dot, label: it.label
           })),
-          stacks // [{center:{x,y}, box:{left,top,width,height}, iatas:[...]}]
+          stacks
         };
       }
 
-      // ---- Debounced updater on pan/zoom ----
+      // update cycle
       let tmr = null;
       function updateAll(){
         updateMeter();
@@ -522,21 +488,18 @@ def build_map() -> folium.Map:
       }
       function scheduleUpdate(){
         if (tmr) clearTimeout(tmr);
-        tmr = setTimeout(updateAll, UPDATE_DEBOUNCE_MS);
+        tmr = setTimeout(updateAll, __UPDATE_DEBOUNCE_MS__);
       }
 
-      // initial + events
       if (map.whenReady) map.whenReady(updateAll);
-      updateMeter(); // in case already ready
+      updateMeter();
 
       map.on('zoom zoomend', updateMeter);
       map.on('move moveend zoom zoomend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
 
-      // Console hint
       const snap = window.ACA_DB.get();
       if (snap){
         console.debug("[ACA] snapshot @", snap.ts, "items:", snap.count, "stacks:", (snap.stacks||[]).length);
-        console.debug("[ACA] try: window.ACA_DB.get(), window.ACA_DB.export()");
       }
     }
   } catch (err) {
@@ -555,7 +518,6 @@ def build_map() -> folium.Map:
           .replace("__UPDATE_DEBOUNCE_MS__", str(int(UPDATE_DEBOUNCE_MS)))
           .replace("__STACK_ON_AT_Z__", str(float(STACK_ON_AT_Z)))
           .replace("__CLUSTER_R_PX__", str(int(CLUSTER_R_PX)))
-          .replace("__STACK_LIST_OFFSET_PX__", str(int(STACK_LIST_OFFSET_PX)))
     )
 
     m.get_root().script.add_child(folium.Element(js))
