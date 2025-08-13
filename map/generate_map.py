@@ -252,7 +252,8 @@ def build_map() -> folium.Map:
     js = r"""
 (function(){
   try {
-    const MAP = __MAP__;
+    // Look up the map variable *by name* from window to avoid ReferenceError
+    const MAP_NAME = "__MAP_NAME__";
     const ZOOM_SNAP = __ZOOM_SNAP__;
     const ZOOM_DELTA = __ZOOM_DELTA__;
     const WHEEL_PX = __WHEEL_PX__;
@@ -260,11 +261,7 @@ def build_map() -> folium.Map:
     const DB_MAX_HISTORY = __DB_MAX_HISTORY__;
     const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
 
-    // Expose a tiny "DB" for current positions + history
-    // window.ACA_DB.latest -> last snapshot
-    // window.ACA_DB.history -> array of last N snapshots
-    // window.ACA_DB.get() -> returns latest
-    // window.ACA_DB.export() -> JSON string of latest
+    // Tiny DB for positions
     window.ACA_DB = window.ACA_DB || { latest:null, history:[] };
     function pushSnapshot(snap){
       window.ACA_DB.latest = snap;
@@ -276,7 +273,7 @@ def build_map() -> folium.Map:
     window.ACA_DB.get = function(){ return window.ACA_DB.latest; };
     window.ACA_DB.export = function(){ try { return JSON.stringify(window.ACA_DB.latest, null, 2); } catch(e){ return "{}"; } };
 
-    function until(cond, cb, tries=80, delay=100){
+    function until(cond, cb, tries=200, delay=50){
       (function tick(n){
         if (cond()) return cb();
         if (n<=0) return;
@@ -285,15 +282,18 @@ def build_map() -> folium.Map:
     }
 
     until(
-      ()=> typeof MAP !== "undefined" && MAP && MAP.getPanes && MAP.getContainer,
+      ()=> typeof window[MAP_NAME] !== "undefined" &&
+          window[MAP_NAME] &&
+          window[MAP_NAME].getPanes &&
+          window[MAP_NAME].getContainer,
       init,
-      80, 100
+      200, 50
     );
 
     function init(){
-      const map = MAP;
+      const map = window[MAP_NAME];
 
-      // ---- Smooth, fine-grained wheel zoom (simple + readable) ----
+      // ---- Smooth, fine-grained wheel zoom ----
       function tuneWheel(){
         map.options.zoomSnap = ZOOM_SNAP;
         map.options.zoomDelta = ZOOM_DELTA;
@@ -306,7 +306,7 @@ def build_map() -> folium.Map:
       }
       tuneWheel();
 
-      // ---- Zoom meter (top-left) ----
+      // ---- Zoom meter ----
       const meter = document.getElementById('zoomMeter');
       function updateMeter(){
         if (!meter) return;
@@ -328,7 +328,6 @@ def build_map() -> folium.Map:
         };
       }
       function ensureWrap(el){
-        // Ensure a .ttxt span exists for stable text measurement
         let txt = el.querySelector('.ttxt');
         if (!txt){
           const span = document.createElement('span');
@@ -341,7 +340,7 @@ def build_map() -> folium.Map:
         return txt;
       }
 
-      // ---- Collect a snapshot of all dots + label centers (screen coords) ----
+      // ---- Collect positions snapshot ----
       function collectPositions(){
         const rect = rectBase();
         const items = [];
@@ -353,7 +352,6 @@ def build_map() -> folium.Map:
           const el = tt._container;
           if (!el || !el.classList.contains('iata-tt')) return;
 
-          // Derive attributes
           const latlng = lyr.getLatLng();
           const dotPt = map.latLngToContainerPoint(latlng);
           const cls = Array.from(el.classList);
@@ -361,16 +359,12 @@ def build_map() -> folium.Map:
           const iata = (cls.find(c=>c.startsWith('tt-'))||'tt-').slice(3);
           const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
 
-          // Label geometry
           const txt = ensureWrap(el);
           const R = rect(txt);
-          const cx = R.x + R.w/2;
-          const cy = R.y + R.h/2;
+          const cx = R.x + R.w/2, cy = R.y + R.h/2;
 
           items.push({
-            iata,
-            size,
-            color,
+            iata, size, color,
             dot:   { lat: latlng.lat, lng: latlng.lng, x: dotPt.x, y: dotPt.y },
             label: { x: R.x, y: R.y, w: R.w, h: R.h, cx, cy }
           });
@@ -402,27 +396,28 @@ def build_map() -> folium.Map:
       }
 
       // initial + events
-      map.whenReady(function(){
+      if (map.whenReady) map.whenReady(function(){
         updateMeter();
         collectPositions();
       });
-      map.on('zoom', updateMeter);
-      map.on('move zoom moveend zoomend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
+      updateMeter(); // also call once in case map is already ready
 
-      // Optional: log a quick peek to console on ready
-      map.whenReady(function(){
-        const snap = window.ACA_DB.get();
-        if (snap){
-          console.debug("[ACA] positions snapshot @", snap.ts, "items:", snap.count);
-          console.debug("[ACA] try in console: window.ACA_DB.get(), window.ACA_DB.export()");
-        }
-      });
+      map.on('zoom zoomend', updateMeter);
+      map.on('move moveend zoom zoomend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
+
+      // Console hint
+      const snap = window.ACA_DB.get();
+      if (snap){
+        console.debug("[ACA] positions snapshot @", snap.ts, "items:", snap.count);
+        console.debug("[ACA] try: window.ACA_DB.get(), window.ACA_DB.export()");
+      }
     }
   } catch (err) {
     console.error("[ACA] init failed:", err);
   }
 })();
 """
+
 
     js = (js
           .replace("__MAP__", m.get_name())
