@@ -31,12 +31,12 @@ STROKE = 2
 
 LABEL_GAP_PX = 10
 SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
-PAD_PX = 2
+PAD_PX = 4
 
 # Placement solver knobs
-DRIFT_PX = 28     # max distance a label may move from its dot (px)
-ITERS = 24        # relaxation iterations
-FSTEP = 0.55      # solver step (0.45–0.65 good)
+DRIFT_PX = 18     # max distance a label may move from its dot (px)
+ITERS = 216        # relaxation iterations
+FSTEP = 0.5      # solver step (0.45–0.65 good)
 
 EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
 
@@ -268,8 +268,8 @@ def build_map() -> folium.Map:
     const FSTEP = __FSTEP__;
 
     // clustering/stacking knobs (px)
-    const STACK_R = 26;         // cluster radius in pixels (dot proximity)
-    const LIST_OFFSET = 10;     // gap from cluster box to list
+    const STACK_R = 80;         // cluster radius in pixels (dot proximity)
+    const LIST_OFFSET = 12;     // gap from cluster box to list
     const LIST_MAX_HEIGHT_PAD = 6;
 
     function until(cond, cb, tries=80, delay=100){
