@@ -1,6 +1,6 @@
 # map/generate_map.py
 # Builds docs/index.html with the ACA Americas map (labels only, smart placement near dots).
-# If data fetch fails, writes a fallback page so Pages still serves something.
+# If data fetch fails, writes a fallback page so Pages still serves something.f
 
 import io
 import json
