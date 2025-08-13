@@ -50,6 +50,9 @@ HIDE_LABELS_BELOW_Z = 5.7  # hide ALL labels when z < this; restore when z >= th
 # --- “30 miles” grouping (scaled to pixels each zoom) ---
 GROUP_RADIUS_MILES = 30.0  # world distance; converted to pixels per zoom automatically
 
+# --- Visual tweak for stacked rows ---
+STACK_ROW_GAP_PX = 6       # spacing between rows in a stack (labels-only style)
+
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
 
@@ -176,7 +179,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.3-zoom+posdb+stack-out+miles"
+    BUILD_VER = "base-r1.4-zoom+posdb+stack-out+miles"
 
     # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
@@ -278,9 +281,9 @@ def build_map() -> folium.Map:
     const DB_MAX_HISTORY = __DB_MAX_HISTORY__;
     const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
 
-    const STACK_ON_AT_Z = __STACK_ON_AT_Z__;     // stacks when z <= this
-    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__; // hide all when z < this
-    const GROUP_RADIUS_MILES = __GROUP_RADIUS_MILES__;
+    const STACK_ON_AT_Z = __STACK_ON_AT_Z__;              // stacks when z <= this
+    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__;  // hide all labels when z < this
+    const GROUP_RADIUS_MILES = __GROUP_RADIUS_MILES__;     // world miles, scaled to px per zoom
 
     // snapshot DB
     window.ACA_DB = window.ACA_DB || { latest:null, history:[] };
@@ -437,7 +440,7 @@ def build_map() -> folium.Map:
         div.className = 'iata-stack';
 
         // anchor = topmost label in the group
-        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
+        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y));
         const anchorIdx = sorted[0];
         const anchor = items[anchorIdx];
 
@@ -448,7 +451,8 @@ def build_map() -> folium.Map:
           r.textContent = items[i].iata;
           div.appendChild(r);
         });
-        pane.appendChild(div);
+        const tp = map.getPanes().tooltipPane;
+        tp.appendChild(div);
 
         // place exactly where the anchor label is (top-left)
         // re-measure next frame to be *sure* after DOM/layout settles
