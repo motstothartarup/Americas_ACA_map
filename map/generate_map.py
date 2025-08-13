@@ -420,14 +420,15 @@ def build_map() -> folium.Map:
 
 
     js = (js
-          .replace("__MAP__", m.get_name())
+          .replace("__MAP_NAME__", m.get_name())   # <— note the token name change
           .replace("__ZOOM_SNAP__", str(float(ZOOM_SNAP)))
           .replace("__ZOOM_DELTA__", str(float(ZOOM_DELTA)))
           .replace("__WHEEL_PX__", str(int(WHEEL_PX_PER_ZOOM)))
           .replace("__WHEEL_DEBOUNCE__", str(int(WHEEL_DEBOUNCE_MS)))
           .replace("__DB_MAX_HISTORY__", str(int(DB_MAX_HISTORY)))
           .replace("__UPDATE_DEBOUNCE_MS__", str(int(UPDATE_DEBOUNCE_MS)))
-          )
+)
+
 
     m.get_root().script.add_child(folium.Element(js))
     return m
