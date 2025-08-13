@@ -93,9 +93,14 @@ def fetch_aca_html(timeout: int = 45) -> str:
 
 def parse_aca_table(html: str) -> pd.DataFrame:
     """Return dataframe with: iata, airport, country, region, aca_level, region4."""
-    soup = BeautifulSoup(html, "lxml")
-    dfs = []
+    # Use lxml if available; fall back to html.parser to avoid runtime failures.
+    soup = None
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
 
+    dfs = []
     table = soup.select_one(".airports-listview table")
     if table is not None:
         try:
@@ -179,7 +184,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.4-zoom+posdb+stack-out+miles"
+    BUILD_VER = "base-r1.5-zoom+posdb+stack-out+miles"
 
     # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
@@ -282,7 +287,7 @@ def build_map() -> folium.Map:
     const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
 
     const STACK_ON_AT_Z = __STACK_ON_AT_Z__;              // stacks when z <= this
-    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__;  // hide all labels when z < this
+    const HIDE_LABELS_BELOW_Z = __HIDE_LABELS_BELOW_Z__;  # hide all labels when z < this
     const GROUP_RADIUS_MILES = __GROUP_RADIUS_MILES__;     // world miles, scaled to px per zoom
 
     // snapshot DB
@@ -440,7 +445,7 @@ def build_map() -> folium.Map:
         div.className = 'iata-stack';
 
         // anchor = topmost label in the group
-        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y));
+        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
         const anchorIdx = sorted[0];
         const anchor = items[anchorIdx];
 
@@ -451,8 +456,7 @@ def build_map() -> folium.Map:
           r.textContent = items[i].iata;
           div.appendChild(r);
         });
-        const tp = map.getPanes().tooltipPane;
-        tp.appendChild(div);
+        pane.appendChild(div);
 
         // place exactly where the anchor label is (top-left)
         // re-measure next frame to be *sure* after DOM/layout settles
