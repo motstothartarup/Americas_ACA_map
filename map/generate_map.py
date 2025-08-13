@@ -1,6 +1,7 @@
 # map/generate_map.py
-# Builds docs/index.html with the ACA Americas map (labels only, smart placement near dots).
-# If data fetch fails, writes a fallback page so Pages still serves something.
+# Builds docs/index.html with the ACA Americas map (dots + labels only),
+# smooth/fine-grained zoom, and a simple JS "database" of on-screen positions
+# of dots and label centers that updates on load and after pan/zoom.
 
 import io
 import json
@@ -29,35 +30,17 @@ PALETTE = {
 RADIUS = {"large": 8, "medium": 7, "small": 6}
 STROKE = 2
 
-LABEL_GAP_PX = 10
-SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
-PAD_PX = 12                                   # overlap sensitivity for solver collisions
+LABEL_GAP_PX = 10  # vertical gap between dot and label
 
-# Placement solver knobs
-DRIFT_PX = 40     # max label drift from dot (px)
-ITERS = 40        # relaxation iterations
-FSTEP = 0.50      # solver step
-
-EXT_FRACTION = 0.01  # fraction of zoom range for “extended keep”
-
-# --- Behavior knobs (tweak freely) ---
-DOT_HIDE_BELOW_Z   = 4     # hide DOTS when zoom < this (labels independent of this)
-ALIGN_LEFT_AT_Z    = 12    # stacks anchor LEFT when zoom <= this
-STACK_R_PX         = 100   # screen-pixel proximity that triggers stacking
-NEAR_MILES         = 100   # “same city” clustering radius (miles)
-LIST_OFFSET_PX     = 12    # gap between cluster bbox and stacked list
-STACK_ROW_GAP_PX   = 8     # extra space between rows in a stack
-
-# NEW: hide LABELS (tooltips & stacks) outside these zoom ranges.
-# Set to -1 to disable the bound. Example: hide labels when zoom < 4 -> BELOW=4, ABOVE=-1.
-LABEL_HIDE_BELOW_Z = 4
-LABEL_HIDE_ABOVE_Z = -1
-
-# NEW: smooth, fine-grained wheel zoom
-ZOOM_SNAP = 0.10           # allow fractional zoom (smaller = finer)
+# --- Zoom tuning knobs (ONLY zoom logic uses these) ---
+ZOOM_SNAP = 0.10           # allow fractional zoom
 ZOOM_DELTA = 0.25          # keyboard +/- step
-WHEEL_PX_PER_ZOOM = 220    # higher => smaller change per wheel tick
-WHEEL_DEBOUNCE_MS = 15     # lower => more responsive wheel
+WHEEL_PX_PER_ZOOM = 220    # higher = gentler wheel zoom
+WHEEL_DEBOUNCE_MS = 15     # smaller = more responsive wheel
+
+# --- Position DB knobs ---
+DB_MAX_HISTORY = 200       # keep last N snapshots
+UPDATE_DEBOUNCE_MS = 120   # debounce for move/zoom updates
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -185,9 +168,9 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "solver-r3.8-stacks+city+hide+meter+smooth"
+    BUILD_VER = "base-r1.0-zoom+posdb"
 
-    # --- CSS + footer badge + zoom meter (tokens replaced inline) ---
+    # --- CSS + footer badge + zoom meter ---
     badge_html = (
         r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -213,21 +196,6 @@ def build_map() -> folium.Map:
   box-shadow:0 2px 8px rgba(0,0,0,.12);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
 }
-/* stacked cluster label */
-.iata-stack{
-  position:absolute; z-index:9998; pointer-events:none;
-  background:#fff; color:#485260;
-  border:1px solid rgba(0,0,0,.25); border-radius:8px;
-  padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
-  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
-}
-.iata-stack .row{ line-height:1.30; white-space:nowrap; margin: __ROWGAP__px 0; }
-.iata-stack .dot{
-  display:inline-block; width:6px; height:6px; border-radius:50%;
-  margin-right:6px; border:1px solid rgba(0,0,0,.25);
-  transform: translateY(-1px);
-}
-/* zoom meter (top-left) */
 .zoom-meter{
   position:absolute; left:12px; top:12px; z-index:9999;
   background:#fff; padding:6px 8px; border-radius:8px;
@@ -240,12 +208,11 @@ def build_map() -> folium.Map:
 <div id="zoomMeter" class="zoom-meter">Zoom: --%</div>
 """
         .replace("__UPDATED__", updated)
-        .replace("__VER__", SOLVER_VER)
-        .replace("__ROWGAP__", str(int(STACK_ROW_GAP_PX)))
+        .replace("__VER__", BUILD_VER)
     )
     m.get_root().html.add_child(folium.Element(badge_html))
 
-    # dots + permanent tooltips
+    # --- dots + permanent tooltips (labels) ---
     for _, r in amer.iterrows():
         lat, lon = float(r.latitude_deg), float(r.longitude_deg)
         size = r.size
@@ -281,36 +248,33 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: relaxation + stacked lists + city clustering + dot/label hiding + zoom meter + smooth wheel ---
+    # --- JS: smooth zoom + zoom meter + simple position DB (no label organizing) ---
     js = r"""
 (function(){
   try {
-    console.debug("[ACA] solver r3.8 start");
-
     const MAP = __MAP__;
-    const SHOWZ = __SHOWZ__;
-    const PAD   = __PAD__;
-    const PRIOR = {large:0, medium:1, small:2};
-    const DRIFT = __DRIFT__;
-    const EXTFRAC = __EXTFRAC__;
-    const ITERS = __ITERS__;
-    const FSTEP = __FSTEP__;
-
-    // behavior/stack knobs
-    const DOT_HIDE_Z      = __DOT_HIDE_Z__;
-    const ALIGN_LEFT_Z    = __ALIGN_LEFT_Z__;
-    const STACK_R         = __STACK_R__;
-    const LIST_OFFSET     = __LIST_OFFSET__;
-    const NEAR_MILES      = __NEAR_MILES__;
-    const ROW_GAP         = __ROW_GAP__;
-    const LABEL_HIDE_BELOW= __LABEL_HIDE_BELOW__;
-    const LABEL_HIDE_ABOVE= __LABEL_HIDE_ABOVE__;
-
-    // smooth wheel zoom knobs
     const ZOOM_SNAP = __ZOOM_SNAP__;
     const ZOOM_DELTA = __ZOOM_DELTA__;
     const WHEEL_PX = __WHEEL_PX__;
     const WHEEL_DEBOUNCE = __WHEEL_DEBOUNCE__;
+    const DB_MAX_HISTORY = __DB_MAX_HISTORY__;
+    const UPDATE_DEBOUNCE_MS = __UPDATE_DEBOUNCE_MS__;
+
+    // Expose a tiny "DB" for current positions + history
+    // window.ACA_DB.latest -> last snapshot
+    // window.ACA_DB.history -> array of last N snapshots
+    // window.ACA_DB.get() -> returns latest
+    // window.ACA_DB.export() -> JSON string of latest
+    window.ACA_DB = window.ACA_DB || { latest:null, history:[] };
+    function pushSnapshot(snap){
+      window.ACA_DB.latest = snap;
+      window.ACA_DB.history.push(snap);
+      if (window.ACA_DB.history.length > DB_MAX_HISTORY){
+        window.ACA_DB.history.splice(0, window.ACA_DB.history.length - DB_MAX_HISTORY);
+      }
+    }
+    window.ACA_DB.get = function(){ return window.ACA_DB.latest; };
+    window.ACA_DB.export = function(){ try { return JSON.stringify(window.ACA_DB.latest, null, 2); } catch(e){ return "{}"; } };
 
     function until(cond, cb, tries=80, delay=100){
       (function tick(n){
@@ -329,7 +293,7 @@ def build_map() -> folium.Map:
     function init(){
       const map = MAP;
 
-      // fine-grained, smooth wheel zoom
+      // ---- Smooth, fine-grained wheel zoom (simple + readable) ----
       function tuneWheel(){
         map.options.zoomSnap = ZOOM_SNAP;
         map.options.zoomDelta = ZOOM_DELTA;
@@ -342,7 +306,7 @@ def build_map() -> folium.Map:
       }
       tuneWheel();
 
-      // zoom meter
+      // ---- Zoom meter (top-left) ----
       const meter = document.getElementById('zoomMeter');
       function updateMeter(){
         if (!meter) return;
@@ -353,9 +317,8 @@ def build_map() -> folium.Map:
         const pct = Math.round( ( (z - minZ) / Math.max(1e-6, (maxZ - minZ)) ) * 100 );
         meter.textContent = "Zoom: " + pct + "% (z=" + z.toFixed(2) + ")";
       }
-      map.on('zoom', updateMeter);
-      map.whenReady(updateMeter);
 
+      // ---- Helpers for measuring on-screen positions ----
       function getContainer(){ return map.getContainer(); }
       function rectBase(){
         const crect = getContainer().getBoundingClientRect();
@@ -364,33 +327,8 @@ def build_map() -> folium.Map:
           return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
         };
       }
-      function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
-      function overlaps(A,B,p){
-        return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
-      }
-      function mtv(A,B){
-        const ac = center(A), bc = center(B);
-        const dx = bc.x - ac.x, dy = bc.y - ac.y;
-        const px = (A.w/2 + B.w/2) - Math.abs(dx);
-        const py = (A.h/2 + B.h/2) - Math.abs(dy);
-        if (px <= 0 || py <= 0) return null;
-        if (px < py) return { x: Math.sign(dx) * px, y: 0 };
-        return { x: 0, y: Math.sign(dy) * py };
-      }
-      function rectCirclePenetration(R, Cx, Cy, Cr){
-        const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
-        const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
-        const qx = Cx - rx, qy = Cy - ry;
-        const d2 = qx*qx + qy*qy;
-        const r  = Cr + PAD;
-        if (d2 >= r*r) return null;
-        const d = Math.max(1e-6, Math.sqrt(d2));
-        const ux = qx / d, uy = qy / d;
-        const pen = r - d;
-        return { x: -ux * pen, y: -uy * pen };
-      }
-      function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
       function ensureWrap(el){
+        // Ensure a .ttxt span exists for stable text measurement
         let txt = el.querySelector('.ttxt');
         if (!txt){
           const span = document.createElement('span');
@@ -403,8 +341,10 @@ def build_map() -> folium.Map:
         return txt;
       }
 
-      function collect(rect){
-        const items=[];
+      // ---- Collect a snapshot of all dots + label centers (screen coords) ----
+      function collectPositions(){
+        const rect = rectBase();
+        const items = [];
         map.eachLayer(lyr=>{
           if (!(lyr instanceof L.CircleMarker)) return;
           const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
@@ -413,302 +353,85 @@ def build_map() -> folium.Map:
           const el = tt._container;
           if (!el || !el.classList.contains('iata-tt')) return;
 
+          // Derive attributes
+          const latlng = lyr.getLatLng();
+          const dotPt = map.latLngToContainerPoint(latlng);
           const cls = Array.from(el.classList);
           const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
-          const txt = ensureWrap(el);
-          txt.style.transform = 'translate(0px,0px)'; // reset
-          const baseRect = rect(txt);
-          const latlng = lyr.getLatLng();
-          const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
-          const pt = map.latLngToContainerPoint(latlng);
+          const iata = (cls.find(c=>c.startsWith('tt-'))||'tt-').slice(3);
           const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
-          items.push({ el, txt, size, baseRect, latlng, radius, pt, color, dx:0, dy:0, density:0, marker:lyr });
-        });
-        return items;
-      }
 
-      function scoreDensity(items){
-        const R = 70;
-        for (let i=0;i<items.length;i++){
-          let c=0;
-          for (let j=0;j<items.length;j++){
-            if (i===j) continue;
-            const dx = items[i].pt.x - items[j].pt.x;
-            const dy = items[i].pt.y - items[j].pt.y;
-            if (dx*dx + dy*dy <= R*R) c++;
-          }
-          items[i].density = c;
-        }
-      }
+          // Label geometry
+          const txt = ensureWrap(el);
+          const R = rect(txt);
+          const cx = R.x + R.w/2;
+          const cy = R.y + R.h/2;
 
-      function rectFrom(it, dx, dy){
-        return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
-      }
-
-      // cluster by proximity; if two dots are within NEAR_MILES, treat as same-city
-      function buildClusters(items, finals, z){
-        const n = items.length;
-        const parent = Array.from({length:n}, (_,i)=>i);
-        function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
-        function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
-
-        const nearMeters = NEAR_MILES * 1609.344;
-
-        for(let i=0;i<n;i++){
-          for(let j=i+1;j<n;j++){
-            const dx = items[i].pt.x - items[j].pt.x;
-            const dy = items[i].pt.y - items[j].pt.y;
-            const screenClose = (dx*dx + dy*dy) <= (STACK_R*STACK_R);
-            const geoClose = map.distance(items[i].latlng, items[j].latlng) <= nearMeters;
-
-            const stillOverlap = overlaps(finals[i], finals[j], PAD);
-            if (stillOverlap || (geoClose && z <= ALIGN_LEFT_Z) || (screenClose && stillOverlap)){
-              uni(i,j);
-            }
-          }
-        }
-        const groups = new Map();
-        for(let i=0;i<n;i++){
-          const r = find(i);
-          if(!groups.has(r)) groups.set(r, []);
-          groups.get(r).push(i);
-        }
-        return Array.from(groups.values()).filter(g => g.length >= 2);
-      }
-
-      function drawStackForCluster(clusterIdxs, items, finals, z){
-        const pane = map.getPanes().tooltipPane;
-        if (!pane) return;
-
-        // hide individual labels in the cluster
-        clusterIdxs.forEach(i => { items[i].el.style.display = 'none'; });
-
-        // cluster bbox in screen coords
-        let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-        clusterIdxs.forEach(i=>{
-          const R = finals[i];
-          minX = Math.min(minX, R.x);
-          minY = Math.min(minY, R.y);
-          maxX = Math.max(maxX, R.x + R.w);
-          maxY = Math.max(maxY, R.y + R.h);
+          items.push({
+            iata,
+            size,
+            color,
+            dot:   { lat: latlng.lat, lng: latlng.lng, x: dotPt.x, y: dotPt.y },
+            label: { x: R.x, y: R.y, w: R.w, h: R.h, cx, cy }
+          });
         });
 
-        // sort rows vertically (stable)
-        const rows = clusterIdxs.slice().sort((a,b)=> items[a].pt.y - items[b].pt.y);
-
-        const div = document.createElement('div');
-        div.className = 'iata-stack';
-        rows.forEach(i=>{
-          const r = document.createElement('div');
-          r.className = 'row';
-          r.style.marginTop = ROW_GAP + "px";
-          r.style.marginBottom = ROW_GAP + "px";
-          const dot = document.createElement('span');
-          dot.className = 'dot';
-          dot.style.background = items[i].color;
-          const t = document.createElement('span');
-          t.textContent = items[i].txt.textContent;
-          r.appendChild(dot);
-          r.appendChild(t);
-          div.appendChild(r);
-        });
-        pane.appendChild(div);
-
-        const mapW = map.getSize().x, mapH = map.getSize().y;
-        const width  = div.getBoundingClientRect().width;
-        const height = div.getBoundingClientRect().height;
-
-        // placement: if zoomed out enough, anchor LEFT of the cluster bbox
-        const forceLeft = (z <= ALIGN_LEFT_Z);
-        let x, y;
-        y = Math.round(minY);
-        if (forceLeft){
-          x = Math.round(minX - LIST_OFFSET - width);
-        }else{
-          x = Math.round(maxX + LIST_OFFSET);
-          if (x + width > mapW - 2) {
-            x = Math.round(minX - LIST_OFFSET - width);
-          }
-        }
-
-        // clamp inside map view
-        y = Math.max(6, Math.min(y, mapH - height - 6));
-        x = Math.max(2, Math.min(x, mapW - width - 2));
-
-        div.style.left = x + "px";
-        div.style.top  = y + "px";
-      }
-
-      function clearStacks(){
-        const pane = map.getPanes().tooltipPane;
-        if (!pane) return;
-        pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
-      }
-
-      function hideOrShowDots(items, z){
-        items.forEach(it=>{
-          if (!it.marker || !it.marker.setStyle) return;
-          if (z < DOT_HIDE_Z){
-            it.marker.setStyle({ opacity: 0, fillOpacity: 0 });
-          }else{
-            it.marker.setStyle({ opacity: 1, fillOpacity: 0.95 });
-          }
-        });
-      }
-
-      function solve(){
-        const rect = rectBase();
-        let items = collect(rect);
-        if (!items.length) return;
-
-        clearStacks();
-
+        const now = new Date().toISOString();
         const z = map.getZoom();
-        hideOrShowDots(items, z); // dot visibility by zoom
-
-        // global label hide (independent of size gates)
-        const hideLabelsGlobally =
-          ((LABEL_HIDE_BELOW >= 0 && z < LABEL_HIDE_BELOW) ||
-           (LABEL_HIDE_ABOVE >= 0 && z > LABEL_HIDE_ABOVE));
-
-        if (hideLabelsGlobally){
-          items.forEach(it => { it.el.style.display = 'none'; });
-          return; // skip all label work (no stacks either)
-        }
-
-        const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
-        let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
-        if (maxZ == null) maxZ = 19;
-        const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
-
-        items.forEach(it=>{
-          const baseGate = (SHOWZ[it.size] || 7);
-          const extGate  = Math.max(minZ, baseGate - span);
-          it.__baseGate = baseGate; it.__extGate = extGate;
-          if (z < extGate) it.el.style.display = 'none';
-          else it.el.style.display = 'block';
-          it.txt.style.opacity = '1';
-          it.dx = 0; it.dy = 0;
-        });
-
-        items = items.filter(it => it.el.style.display !== 'none');
-        if (!items.length) return;
-
-        scoreDensity(items);
-        items.sort((a,b)=>{
-          const d = b.density - a.density; if (d) return d;
-          const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
-          return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
-        });
-
-        const W = map.getSize().x, H = map.getSize().y;
-        const boundsMargin = 2;
-
-        // relaxation pass
-        for (let t=0; t<ITERS; t++){
-          const rects = items.map(it => rectFrom(it, it.dx, it.dy));
-          const fx = new Array(items.length).fill(0);
-          const fy = new Array(items.length).fill(0);
-
-          for (let i=0;i<items.length;i++){
-            for (let j=i+1;j<items.length;j++){
-              const v = mtv(rects[i], rects[j]);
-              if (!v) continue;
-              fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
-              fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
-            }
-          }
-
-          for (let i=0;i<items.length;i++){
-            const it = items[i];
-            const R  = rects[i];
-            const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
-            if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
-            fx[i] += -0.05 * it.dx;
-            fy[i] += -0.05 * it.dy;
-
-            if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
-            if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
-            if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
-            if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
-          }
-
-          for (let i=0;i<items.length;i++){
-            items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
-            items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
-          }
-        }
-
-        // apply transforms
-        const finals = items.map(it => rectFrom(it, it.dx, it.dy));
-        for (let i=0;i<items.length;i++){
-          const it = items[i];
-          const R  = finals[i];
-          let collides = false;
-          for (let j=0;j<items.length;j++){
-            if (i===j) continue;
-            if (overlaps(R, finals[j], PAD)) { collides = true; break; }
-          }
-          const inExt = (z < it.__baseGate) && (z >= it.__extGate);
-          if (!inExt || !collides){
-            it.el.style.display = 'block';
-            it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
-            if (collides) it.txt.style.opacity = "0.9";
-          } else {
-            it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
-          }
-        }
-
-        // stacked list stage (includes “same city” clustering)
-        const clusters = buildClusters(items, finals, z);
-        if (clusters.length){
-          clusters.forEach(g => drawStackForCluster(g, items, finals, z));
-        }
+        const b = map.getBounds();
+        const snap = {
+          ts: now,
+          zoom: z,
+          bounds: { n: b.getNorth(), s: b.getSouth(), e: b.getEast(), w: b.getWest() },
+          size: { w: map.getSize().x, h: map.getSize().y },
+          count: items.length,
+          items
+        };
+        pushSnapshot(snap);
+        return snap;
       }
 
-      // schedule
-      let raf1=0, raf2=0;
-      function schedule(){
-        if (raf1) cancelAnimationFrame(raf1);
-        if (raf2) cancelAnimationFrame(raf2);
-        raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
+      // ---- Debounced updater on pan/zoom ----
+      let tmr = null;
+      function scheduleUpdate(){
+        if (tmr) clearTimeout(tmr);
+        tmr = setTimeout(function(){
+          updateMeter();
+          collectPositions();
+        }, UPDATE_DEBOUNCE_MS);
       }
-      map.whenReady(function(){ setTimeout(schedule, 400); });
-      map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
 
-      const pane = map.getPanes().tooltipPane;
-      if (pane && 'MutationObserver' in window){
-        const mo = new MutationObserver(schedule);
-        mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
-      }
+      // initial + events
+      map.whenReady(function(){
+        updateMeter();
+        collectPositions();
+      });
+      map.on('zoom', updateMeter);
+      map.on('move zoom moveend zoomend overlayadd overlayremove layeradd layerremove', scheduleUpdate);
+
+      // Optional: log a quick peek to console on ready
+      map.whenReady(function(){
+        const snap = window.ACA_DB.get();
+        if (snap){
+          console.debug("[ACA] positions snapshot @", snap.ts, "items:", snap.count);
+          console.debug("[ACA] try in console: window.ACA_DB.get(), window.ACA_DB.export()");
+        }
+      });
     }
   } catch (err) {
-    console.error("[ACA] solver r3.8 crashed:", err);
+    console.error("[ACA] init failed:", err);
   }
 })();
 """
 
-    # Substitute tokens and add JS to the script bucket
     js = (js
           .replace("__MAP__", m.get_name())
-          .replace("__SHOWZ__", json.dumps(SHOW_AT))
-          .replace("__PAD__", str(int(PAD_PX)))
-          .replace("__DRIFT__", str(int(DRIFT_PX)))
-          .replace("__EXTFRAC__", str(EXT_FRACTION))
-          .replace("__ITERS__", str(int(ITERS)))
-          .replace("__FSTEP__", str(FSTEP))
-          .replace("__DOT_HIDE_Z__", str(int(DOT_HIDE_BELOW_Z)))
-          .replace("__ALIGN_LEFT_Z__", str(int(ALIGN_LEFT_AT_Z)))
-          .replace("__STACK_R__", str(int(STACK_R_PX)))
-          .replace("__LIST_OFFSET__", str(int(LIST_OFFSET_PX)))
-          .replace("__NEAR_MILES__", str(float(NEAR_MILES)))
-          .replace("__ROW_GAP__", str(int(STACK_ROW_GAP_PX)))
-          .replace("__LABEL_HIDE_BELOW__", str(int(LABEL_HIDE_BELOW_Z)))
-          .replace("__LABEL_HIDE_ABOVE__", str(int(LABEL_HIDE_ABOVE_Z)))
           .replace("__ZOOM_SNAP__", str(float(ZOOM_SNAP)))
           .replace("__ZOOM_DELTA__", str(float(ZOOM_DELTA)))
           .replace("__WHEEL_PX__", str(int(WHEEL_PX_PER_ZOOM)))
           .replace("__WHEEL_DEBOUNCE__", str(int(WHEEL_DEBOUNCE_MS)))
+          .replace("__DB_MAX_HISTORY__", str(int(DB_MAX_HISTORY)))
+          .replace("__UPDATE_DEBOUNCE_MS__", str(int(UPDATE_DEBOUNCE_MS)))
           )
 
     m.get_root().script.add_child(folium.Element(js))
@@ -724,5 +447,4 @@ if __name__ == "__main__":
     except Exception as e:
         print("ERROR building map:", e, file=sys.stderr)
         write_error_page(str(e))
-        # Keep Pages live even if fetch/parsing fails.
         sys.exit(0)
