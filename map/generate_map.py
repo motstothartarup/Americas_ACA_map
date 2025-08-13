@@ -168,7 +168,7 @@ def build_map() -> folium.Map:
     SOLVER_VER = "solver-r3.5"
 
     # --- CSS + footer badge (no f-strings; tokens replaced) ---
-    badge_html = r"""
+badge_html = r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
 <meta http-equiv="Expires" content="0"/>
@@ -192,9 +192,24 @@ def build_map() -> folium.Map:
   box-shadow:0 2px 8px rgba(0,0,0,.12);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
 }
+/* NEW: stacked cluster label */
+.iata-stack{
+  position:absolute; z-index:9998; pointer-events:none;
+  background:#fff; color:#485260;
+  border:1px solid rgba(0,0,0,.25); border-radius:8px;
+  padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
+  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
+}
+.iata-stack .row{ line-height:1.15; white-space:nowrap; }
+.iata-stack .dot{
+  display:inline-block; width:6px; height:6px; border-radius:50%;
+  margin-right:6px; border:1px solid rgba(0,0,0,.25);
+  transform: translateY(-1px);
+}
 </style>
 <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
 """
+
     badge_html = badge_html.replace("__UPDATED__", updated).replace("__VER__", SOLVER_VER)
     m.get_root().html.add_child(folium.Element(badge_html))
 
@@ -236,10 +251,10 @@ def build_map() -> folium.Map:
 
     # --- JS: physics-style relaxation to push labels apart within DRIFT_PX ---
     # IMPORTANT: this goes into the *script bucket* WITHOUT <script> tags.
-    js = r"""
+   js = r"""
 (function(){
   try {
-    console.debug("[ACA] solver r3.5 start");
+    console.debug("[ACA] solver r3.6-stacks start");
 
     const MAP = __MAP__;
     const SHOWZ = __SHOWZ__;
@@ -249,6 +264,11 @@ def build_map() -> folium.Map:
     const EXTFRAC = __EXTFRAC__;
     const ITERS = __ITERS__;
     const FSTEP = __FSTEP__;
+
+    // NEW: clustering/stacking knobs (px)
+    const STACK_R = 26;         // cluster radius in pixels (dot proximity)
+    const LIST_OFFSET = 10;     // gap from cluster box to list
+    const LIST_MAX_HEIGHT_PAD = 6;
 
     function until(cond, cb, tries=80, delay=100){
       (function tick(n){
@@ -266,13 +286,13 @@ def build_map() -> folium.Map:
 
     function init(){
       const map = MAP;
-      console.debug("[ACA] solver r3.5 init on", map);
+      console.debug("[ACA] solver r3.6-stacks init on", map);
 
-      // brief outline to prove script executed
+      // quick outline to prove the script executed
       const styleTag = document.createElement("style");
       styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
       document.head.appendChild(styleTag);
-      setTimeout(()=> styleTag.remove(), 1500);
+      setTimeout(()=> styleTag.remove(), 1200);
 
       function getContainer(){ return map.getContainer(); }
       function rectBase(){
@@ -339,7 +359,9 @@ def build_map() -> folium.Map:
           const latlng = lyr.getLatLng();
           const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
           const pt = map.latLngToContainerPoint(latlng);
-          items.push({ el, txt, size, baseRect, latlng, radius, pt, dx:0, dy:0, density:0 });
+          // NEW: remember fill color for colored dots in the stack list
+          const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
+          items.push({ el, txt, size, baseRect, latlng, radius, pt, color, dx:0, dy:0, density:0 });
         });
         return items;
       }
@@ -362,10 +384,106 @@ def build_map() -> folium.Map:
         return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
       }
 
+      // NEW: cluster by dot proximity (container-point distance)
+      function buildClusters(items, finals){
+        const n = items.length;
+        const parent = Array.from({length:n}, (_,i)=>i);
+        function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
+        function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
+
+        for(let i=0;i<n;i++){
+          for(let j=i+1;j<n;j++){
+            const dx = items[i].pt.x - items[j].pt.x;
+            const dy = items[i].pt.y - items[j].pt.y;
+            if (dx*dx + dy*dy <= STACK_R*STACK_R){
+              // Only union if labels still collide (post-solve)
+              if (overlaps(finals[i], finals[j], PAD)) uni(i,j);
+            }
+          }
+        }
+        const groups = new Map();
+        for(let i=0;i<n;i++){
+          const r = find(i);
+          if(!groups.has(r)) groups.set(r, []);
+          groups.get(r).push(i);
+        }
+        // only clusters with >=2 labels
+        return Array.from(groups.values()).filter(g => g.length >= 2);
+      }
+
+      // NEW: draw stacked list for a cluster
+      function drawStackForCluster(clusterIdxs, items, finals){
+        const pane = map.getPanes().tooltipPane;
+        if (!pane) return;
+
+        // hide individual labels in the cluster
+        clusterIdxs.forEach(i => { items[i].el.style.display = 'none'; });
+
+        // cluster bbox in screen coords (use finals)
+        let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+        clusterIdxs.forEach(i=>{
+          const R = finals[i];
+          minX = Math.min(minX, R.x);
+          minY = Math.min(minY, R.y);
+          maxX = Math.max(maxX, R.x + R.w);
+          maxY = Math.max(maxY, R.y + R.h);
+        });
+
+        // sort rows vertically (stable per zoom)
+        const rows = clusterIdxs.slice().sort((a,b)=> items[a].pt.y - items[b].pt.y);
+
+        const div = document.createElement('div');
+        div.className = 'iata-stack';
+        rows.forEach(i=>{
+          const r = document.createElement('div');
+          r.className = 'row';
+          const dot = document.createElement('span');
+          dot.className = 'dot';
+          dot.style.background = items[i].color;
+          const t = document.createElement('span');
+          t.textContent = items[i].txt.textContent;
+          r.appendChild(dot);
+          r.appendChild(t);
+          div.appendChild(r);
+        });
+        pane.appendChild(div);
+
+        // initial position: to the right of the bbox
+        const crect = getContainer().getBoundingClientRect();
+        const mapW = map.getSize().x, mapH = map.getSize().y;
+        const width  = div.getBoundingClientRect().width;
+        const height = div.getBoundingClientRect().height;
+
+        let x = Math.round(maxX + LIST_OFFSET);
+        let y = Math.round(minY);
+
+        // clamp vertically
+        y = Math.max(LIST_MAX_HEIGHT_PAD, Math.min(y, mapH - height - LIST_MAX_HEIGHT_PAD));
+
+        // if overflows right, place to the left
+        if (x + width > mapW - 2){
+          x = Math.round(minX - LIST_OFFSET - width);
+        }
+        // if still off left edge, clamp to 2px
+        x = Math.max(2, Math.min(x, mapW - width - 2));
+
+        div.style.left = x + "px";
+        div.style.top  = y + "px";
+      }
+
+      function clearStacks(){
+        const pane = map.getPanes().tooltipPane;
+        if (!pane) return;
+        pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
+      }
+
       function solve(){
         const rect = rectBase();
         let items = collect(rect);
         if (!items.length) return;
+
+        // remove any previously drawn stacks
+        clearStacks();
 
         const z = map.getZoom();
         const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
@@ -396,12 +514,12 @@ def build_map() -> folium.Map:
         const W = map.getSize().x, H = map.getSize().y;
         const boundsMargin = 2;
 
+        // --- relaxation pass (unchanged) ---
         for (let t=0; t<ITERS; t++){
           const rects = items.map(it => rectFrom(it, it.dx, it.dy));
           const fx = new Array(items.length).fill(0);
           const fy = new Array(items.length).fill(0);
 
-          // label-label pushes (split MTV)
           for (let i=0;i<items.length;i++){
             for (let j=i+1;j<items.length;j++){
               const v = mtv(rects[i], rects[j]);
@@ -411,31 +529,27 @@ def build_map() -> folium.Map:
             }
           }
 
-          // label-dot (circle) separation + spring + edges
           for (let i=0;i<items.length;i++){
             const it = items[i];
             const R  = rects[i];
             const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
             if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
-
-            // spring to anchor (keep near dot)
             fx[i] += -0.05 * it.dx;
             fy[i] += -0.05 * it.dy;
 
-            // keep inside view
             if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
             if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
             if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
             if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
           }
 
-          // integrate + clamp drift radius
           for (let i=0;i<items.length;i++){
             items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
             items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
           }
         }
 
+        // apply transforms
         const finals = items.map(it => rectFrom(it, it.dx, it.dy));
         for (let i=0;i<items.length;i++){
           const it = items[i];
@@ -446,12 +560,23 @@ def build_map() -> folium.Map:
             if (overlaps(R, finals[j], PAD)) { collides = true; break; }
           }
           const inExt = (z < it.__baseGate) && (z >= it.__extGate);
-          if (collides && inExt){
-            it.el.style.display = 'none';
-          }else{
+          // keep showing at base zooms; we'll convert to stack later if still colliding
+          if (!inExt || !collides){
+            it.el.style.display = 'block';
             it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
             if (collides) it.txt.style.opacity = "0.9";
+          } else {
+            // leave visible for now; stack stage may hide it
+            it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
           }
+        }
+
+        // --- stacked list stage (only if collisions remain) ---
+        // build clusters of items that still collide
+        const clusters = buildClusters(items, finals);
+        if (clusters.length){
+          // draw stacks and hide individuals inside
+          clusters.forEach(g => drawStackForCluster(g, items, finals));
         }
       }
 
@@ -472,10 +597,11 @@ def build_map() -> folium.Map:
       }
     }
   } catch (err) {
-    console.error("[ACA] solver r3.5 crashed:", err);
+    console.error("[ACA] solver r3.6-stacks crashed:", err);
   }
 })();
 """
+
 
     # Substitute tokens (no ${...} conflicts) and put JS in the script bucket
     js = js.replace("__MAP__", m.get_name())
