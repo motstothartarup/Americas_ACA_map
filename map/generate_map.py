@@ -1,6 +1,6 @@
 # map/generate_map.py
 # Builds docs/index.html with the ACA Americas map (labels only, smart placement near dots).
-# If data fetch fails, writes a fallback page so Pages still serves something.f
+# If data fetch fails, writes a fallback page so Pages still serves something.
 
 import io
 import json
@@ -25,6 +25,7 @@ PALETTE = {
     "Level 4+": "#E39A33",
     "Level 5": "#E74C3C",
 }
+
 RADIUS = {"large": 8, "medium": 7, "small": 6}
 STROKE = 2
 
@@ -33,9 +34,9 @@ SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at run
 PAD_PX = 2
 
 # Placement solver knobs
-DRIFT_PX = 28     # max distance a label may move from its dot (px) ≈ 7–8 mm @ 96dpi
-ITERS    = 24     # relaxation iterations
-FSTEP    = 0.55   # solver step (0.45–0.65 good)
+DRIFT_PX = 28     # max distance a label may move from its dot (px)
+ITERS = 24        # relaxation iterations
+FSTEP = 0.55      # solver step (0.45–0.65 good)
 
 EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
 
@@ -166,55 +167,54 @@ def build_map() -> folium.Map:
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     SOLVER_VER = "solver-r3.6-stacks"
-    
-    # --- CSS + footer badge (tokens replaced inline to avoid indent issues) ---
+
+    # --- CSS + footer badge (tokens replaced inline) ---
     badge_html = (
         r"""
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
-    <meta http-equiv="Pragma" content="no-cache"/>
-    <meta http-equiv="Expires" content="0"/>
-    <style>
-    .leaflet-tooltip.iata-tt{
-      background: transparent; border: 0; box-shadow: none;
-      color: #6e6e6e;
-      font-family: "Open Sans","Helvetica Neue",Arial,sans-serif;
-      font-weight: 1000; font-size: 12px; letter-spacing: 0.5px;
-      text-transform: uppercase; white-space: nowrap;
-    }
-    .leaflet-tooltip-top:before,
-    .leaflet-tooltip-bottom:before,
-    .leaflet-tooltip-left:before,
-    .leaflet-tooltip-right:before{ display:none !important; }
-    .leaflet-tooltip.iata-tt .ttxt{ display:inline-block; transform:translate(0px,0px); will-change:transform; }
-    .leaflet-control-layers-expanded{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }
-    .last-updated {
-      position:absolute; right:12px; bottom:12px; z-index:9999;
-      background:#fff; padding:6px 8px; border-radius:8px;
-      box-shadow:0 2px 8px rgba(0,0,0,.12);
-      font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
-    }
-    /* stacked cluster label */
-    .iata-stack{
-      position:absolute; z-index:9998; pointer-events:none;
-      background:#fff; color:#485260;
-      border:1px solid rgba(0,0,0,.25); border-radius:8px;
-      padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
-      font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
-    }
-    .iata-stack .row{ line-height:1.15; white-space:nowrap; }
-    .iata-stack .dot{
-      display:inline-block; width:6px; height:6px; border-radius:50%;
-      margin-right:6px; border:1px solid rgba(0,0,0,.25);
-      transform: translateY(-1px);
-    }
-    </style>
-    <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
-    """
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+<meta http-equiv="Pragma" content="no-cache"/>
+<meta http-equiv="Expires" content="0"/>
+<style>
+.leaflet-tooltip.iata-tt{
+  background: transparent; border: 0; box-shadow: none;
+  color: #6e6e6e;
+  font-family: "Open Sans","Helvetica Neue",Arial,sans-serif;
+  font-weight: 1000; font-size: 12px; letter-spacing: 0.5px;
+  text-transform: uppercase; white-space: nowrap;
+}
+.leaflet-tooltip-top:before,
+.leaflet-tooltip-bottom:before,
+.leaflet-tooltip-left:before,
+.leaflet-tooltip-right:before{ display:none !important; }
+.leaflet-tooltip.iata-tt .ttxt{ display:inline-block; transform:translate(0px,0px); will-change:transform; }
+.leaflet-control-layers-expanded{ box-shadow:0 4px 14px rgba(0,0,0,.12); border-radius:10px; }
+.last-updated {
+  position:absolute; right:12px; bottom:12px; z-index:9999;
+  background:#fff; padding:6px 8px; border-radius:8px;
+  box-shadow:0 2px 8px rgba(0,0,0,.12);
+  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
+}
+/* stacked cluster label */
+.iata-stack{
+  position:absolute; z-index:9998; pointer-events:none;
+  background:#fff; color:#485260;
+  border:1px solid rgba(0,0,0,.25); border-radius:8px;
+  padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
+  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
+}
+.iata-stack .row{ line-height:1.15; white-space:nowrap; }
+.iata-stack .dot{
+  display:inline-block; width:6px; height:6px; border-radius:50%;
+  margin-right:6px; border:1px solid rgba(0,0,0,.25);
+  transform: translateY(-1px);
+}
+</style>
+<div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
+"""
         .replace("__UPDATED__", updated)
         .replace("__VER__", SOLVER_VER)
     )
     m.get_root().html.add_child(folium.Element(badge_html))
-
 
     # dots + permanent tooltips
     for _, r in amer.iterrows():
@@ -252,368 +252,353 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: physics-style relaxation to push labels apart within DRIFT_PX ---
-    # IMPORTANT: this goes into the *script bucket* WITHOUT <script> tags.
-   js = r"""
-        (function(){
-          try {
-            console.debug("[ACA] solver r3.6-stacks start");
-        
-            const MAP = __MAP__;
-            const SHOWZ = __SHOWZ__;
-            const PAD   = __PAD__;
-            const PRIOR = {large:0, medium:1, small:2};
-            const DRIFT = __DRIFT__;
-            const EXTFRAC = __EXTFRAC__;
-            const ITERS = __ITERS__;
-            const FSTEP = __FSTEP__;
-        
-            // NEW: clustering/stacking knobs (px)
-            const STACK_R = 26;         // cluster radius in pixels (dot proximity)
-            const LIST_OFFSET = 10;     // gap from cluster box to list
-            const LIST_MAX_HEIGHT_PAD = 6;
-        
-            function until(cond, cb, tries=80, delay=100){
-              (function tick(n){
-                if (cond()) return cb();
-                if (n<=0) return;
-                setTimeout(()=>tick(n-1), delay);
-              })(tries);
-            }
-        
-            until(
-              ()=> typeof MAP !== "undefined" && MAP && MAP.getPanes && MAP.getContainer,
-              init,
-              80, 100
-            );
-        
-            function init(){
-              const map = MAP;
-              console.debug("[ACA] solver r3.6-stacks init on", map);
-        
-              // quick outline to prove the script executed
-              const styleTag = document.createElement("style");
-              styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
-              document.head.appendChild(styleTag);
-              setTimeout(()=> styleTag.remove(), 1200);
-        
-              function getContainer(){ return map.getContainer(); }
-              function rectBase(){
-                const crect = getContainer().getBoundingClientRect();
-                return function rect(el){
-                  const r = el.getBoundingClientRect();
-                  return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
-                };
-              }
-              function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
-              function overlaps(A,B,p){
-                return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
-              }
-              function mtv(A,B){
-                const ac = center(A), bc = center(B);
-                const dx = bc.x - ac.x, dy = bc.y - ac.y;
-                const px = (A.w/2 + B.w/2) - Math.abs(dx);
-                const py = (A.h/2 + B.h/2) - Math.abs(dy);
-                if (px <= 0 || py <= 0) return null;
-                if (px < py) return { x: Math.sign(dx) * px, y: 0 };
-                return { x: 0, y: Math.sign(dy) * py };
-              }
-              function rectCirclePenetration(R, Cx, Cy, Cr){
-                const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
-                const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
-                const qx = Cx - rx, qy = Cy - ry;
-                const d2 = qx*qx + qy*qy;
-                const r  = Cr + PAD;
-                if (d2 >= r*r) return null;
-                const d = Math.max(1e-6, Math.sqrt(d2));
-                const ux = qx / d, uy = qy / d;
-                const pen = r - d;
-                return { x: -ux * pen, y: -uy * pen };
-              }
-              function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
-              function ensureWrap(el){
-                let txt = el.querySelector('.ttxt');
-                if (!txt){
-                  const span = document.createElement('span');
-                  span.className = 'ttxt';
-                  span.textContent = el.textContent;
-                  el.textContent = '';
-                  el.appendChild(span);
-                  txt = span;
-                }
-                return txt;
-              }
-        
-              function collect(rect){
-                const items=[];
-                map.eachLayer(lyr=>{
-                  if (!(lyr instanceof L.CircleMarker)) return;
-                  const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
-                  if (!tt) return;
-                  if (!tt._container) tt.update();
-                  const el = tt._container;
-                  if (!el || !el.classList.contains('iata-tt')) return;
-        
-                  const cls = Array.from(el.classList);
-                  const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
-                  const txt = ensureWrap(el);
-                  txt.style.transform = 'translate(0px,0px)'; // reset to measure
-                  const baseRect = rect(txt);
-                  const latlng = lyr.getLatLng();
-                  const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
-                  const pt = map.latLngToContainerPoint(latlng);
-                  // NEW: remember fill color for colored dots in the stack list
-                  const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
-                  items.push({ el, txt, size, baseRect, latlng, radius, pt, color, dx:0, dy:0, density:0 });
-                });
-                return items;
-              }
-        
-              function scoreDensity(items){
-                const R = 70;
-                for (let i=0;i<items.length;i++){
-                  let c=0;
-                  for (let j=0;j<items.length;j++){
-                    if (i===j) continue;
-                    const dx = items[i].pt.x - items[j].pt.x;
-                    const dy = items[i].pt.y - items[j].pt.y;
-                    if (dx*dx + dy*dy <= R*R) c++;
-                  }
-                  items[i].density = c;
-                }
-              }
-        
-              function rectFrom(it, dx, dy){
-                return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
-              }
-        
-              // NEW: cluster by dot proximity (container-point distance)
-              function buildClusters(items, finals){
-                const n = items.length;
-                const parent = Array.from({length:n}, (_,i)=>i);
-                function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
-                function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
-        
-                for(let i=0;i<n;i++){
-                  for(let j=i+1;j<n;j++){
-                    const dx = items[i].pt.x - items[j].pt.x;
-                    const dy = items[i].pt.y - items[j].pt.y;
-                    if (dx*dx + dy*dy <= STACK_R*STACK_R){
-                      // Only union if labels still collide (post-solve)
-                      if (overlaps(finals[i], finals[j], PAD)) uni(i,j);
-                    }
-                  }
-                }
-                const groups = new Map();
-                for(let i=0;i<n;i++){
-                  const r = find(i);
-                  if(!groups.has(r)) groups.set(r, []);
-                  groups.get(r).push(i);
-                }
-                // only clusters with >=2 labels
-                return Array.from(groups.values()).filter(g => g.length >= 2);
-              }
-        
-              // NEW: draw stacked list for a cluster
-              function drawStackForCluster(clusterIdxs, items, finals){
-                const pane = map.getPanes().tooltipPane;
-                if (!pane) return;
-        
-                // hide individual labels in the cluster
-                clusterIdxs.forEach(i => { items[i].el.style.display = 'none'; });
-        
-                // cluster bbox in screen coords (use finals)
-                let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-                clusterIdxs.forEach(i=>{
-                  const R = finals[i];
-                  minX = Math.min(minX, R.x);
-                  minY = Math.min(minY, R.y);
-                  maxX = Math.max(maxX, R.x + R.w);
-                  maxY = Math.max(maxY, R.y + R.h);
-                });
-        
-                // sort rows vertically (stable per zoom)
-                const rows = clusterIdxs.slice().sort((a,b)=> items[a].pt.y - items[b].pt.y);
-        
-                const div = document.createElement('div');
-                div.className = 'iata-stack';
-                rows.forEach(i=>{
-                  const r = document.createElement('div');
-                  r.className = 'row';
-                  const dot = document.createElement('span');
-                  dot.className = 'dot';
-                  dot.style.background = items[i].color;
-                  const t = document.createElement('span');
-                  t.textContent = items[i].txt.textContent;
-                  r.appendChild(dot);
-                  r.appendChild(t);
-                  div.appendChild(r);
-                });
-                pane.appendChild(div);
-        
-                // initial position: to the right of the bbox
-                const crect = getContainer().getBoundingClientRect();
-                const mapW = map.getSize().x, mapH = map.getSize().y;
-                const width  = div.getBoundingClientRect().width;
-                const height = div.getBoundingClientRect().height;
-        
-                let x = Math.round(maxX + LIST_OFFSET);
-                let y = Math.round(minY);
-        
-                // clamp vertically
-                y = Math.max(LIST_MAX_HEIGHT_PAD, Math.min(y, mapH - height - LIST_MAX_HEIGHT_PAD));
-        
-                // if overflows right, place to the left
-                if (x + width > mapW - 2){
-                  x = Math.round(minX - LIST_OFFSET - width);
-                }
-                // if still off left edge, clamp to 2px
-                x = Math.max(2, Math.min(x, mapW - width - 2));
-        
-                div.style.left = x + "px";
-                div.style.top  = y + "px";
-              }
-        
-              function clearStacks(){
-                const pane = map.getPanes().tooltipPane;
-                if (!pane) return;
-                pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
-              }
-        
-              function solve(){
-                const rect = rectBase();
-                let items = collect(rect);
-                if (!items.length) return;
-        
-                // remove any previously drawn stacks
-                clearStacks();
-        
-                const z = map.getZoom();
-                const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
-                let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
-                if (maxZ == null) maxZ = 19;
-                const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
-        
-                items.forEach(it=>{
-                  const baseGate = (SHOWZ[it.size] || 7);
-                  const extGate  = Math.max(minZ, baseGate - span);
-                  it.__baseGate = baseGate; it.__extGate = extGate;
-                  if (z < extGate) it.el.style.display = 'none';
-                  else it.el.style.display = 'block';
-                  it.txt.style.opacity = '1';
-                  it.dx = 0; it.dy = 0;
-                });
-        
-                items = items.filter(it => it.el.style.display !== 'none');
-                if (!items.length) return;
-        
-                scoreDensity(items);
-                items.sort((a,b)=>{
-                  const d = b.density - a.density; if (d) return d;
-                  const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
-                  return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
-                });
-        
-                const W = map.getSize().x, H = map.getSize().y;
-                const boundsMargin = 2;
-        
-                // --- relaxation pass (unchanged) ---
-                for (let t=0; t<ITERS; t++){
-                  const rects = items.map(it => rectFrom(it, it.dx, it.dy));
-                  const fx = new Array(items.length).fill(0);
-                  const fy = new Array(items.length).fill(0);
-        
-                  for (let i=0;i<items.length;i++){
-                    for (let j=i+1;j<items.length;j++){
-                      const v = mtv(rects[i], rects[j]);
-                      if (!v) continue;
-                      fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
-                      fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
-                    }
-                  }
-        
-                  for (let i=0;i<items.length;i++){
-                    const it = items[i];
-                    const R  = rects[i];
-                    const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
-                    if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
-                    fx[i] += -0.05 * it.dx;
-                    fy[i] += -0.05 * it.dy;
-        
-                    if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
-                    if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
-                    if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
-                    if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
-                  }
-        
-                  for (let i=0;i<items.length;i++){
-                    items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
-                    items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
-                  }
-                }
-        
-                // apply transforms
-                const finals = items.map(it => rectFrom(it, it.dx, it.dy));
-                for (let i=0;i<items.length;i++){
-                  const it = items[i];
-                  const R  = finals[i];
-                  let collides = false;
-                  for (let j=0;j<items.length;j++){
-                    if (i===j) continue;
-                    if (overlaps(R, finals[j], PAD)) { collides = true; break; }
-                  }
-                  const inExt = (z < it.__baseGate) && (z >= it.__extGate);
-                  // keep showing at base zooms; we'll convert to stack later if still colliding
-                  if (!inExt || !collides){
-                    it.el.style.display = 'block';
-                    it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
-                    if (collides) it.txt.style.opacity = "0.9";
-                  } else {
-                    // leave visible for now; stack stage may hide it
-                    it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
-                  }
-                }
-        
-                // --- stacked list stage (only if collisions remain) ---
-                // build clusters of items that still collide
-                const clusters = buildClusters(items, finals);
-                if (clusters.length){
-                  // draw stacks and hide individuals inside
-                  clusters.forEach(g => drawStackForCluster(g, items, finals));
-                }
-              }
-        
-              // schedule
-              let raf1=0, raf2=0;
-              function schedule(){
-                if (raf1) cancelAnimationFrame(raf1);
-                if (raf2) cancelAnimationFrame(raf2);
-                raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
-              }
-              map.whenReady(function(){ setTimeout(schedule, 400); });
-              map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
-        
-              const pane = map.getPanes().tooltipPane;
-              if (pane && 'MutationObserver' in window){
-                const mo = new MutationObserver(schedule);
-                mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
-              }
-            }
-          } catch (err) {
-            console.error("[ACA] solver r3.6-stacks crashed:", err);
+    # --- JS: physics-style relaxation + stacked list fallback (no <script> tags) ---
+    js = r"""
+(function(){
+  try {
+    console.debug("[ACA] solver r3.6-stacks start");
+
+    const MAP = __MAP__;
+    const SHOWZ = __SHOWZ__;
+    const PAD   = __PAD__;
+    const PRIOR = {large:0, medium:1, small:2};
+    const DRIFT = __DRIFT__;
+    const EXTFRAC = __EXTFRAC__;
+    const ITERS = __ITERS__;
+    const FSTEP = __FSTEP__;
+
+    // clustering/stacking knobs (px)
+    const STACK_R = 26;         // cluster radius in pixels (dot proximity)
+    const LIST_OFFSET = 10;     // gap from cluster box to list
+    const LIST_MAX_HEIGHT_PAD = 6;
+
+    function until(cond, cb, tries=80, delay=100){
+      (function tick(n){
+        if (cond()) return cb();
+        if (n<=0) return;
+        setTimeout(()=>tick(n-1), delay);
+      })(tries);
+    }
+
+    until(
+      ()=> typeof MAP !== "undefined" && MAP && MAP.getPanes && MAP.getContainer,
+      init,
+      80, 100
+    );
+
+    function init(){
+      const map = MAP;
+      console.debug("[ACA] solver r3.6-stacks init on", map);
+
+      // quick outline to prove the script executed
+      const styleTag = document.createElement("style");
+      styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
+      document.head.appendChild(styleTag);
+      setTimeout(()=> styleTag.remove(), 1200);
+
+      function getContainer(){ return map.getContainer(); }
+      function rectBase(){
+        const crect = getContainer().getBoundingClientRect();
+        return function rect(el){
+          const r = el.getBoundingClientRect();
+          return { x: r.left - crect.left, y: r.top - crect.top, w: r.width, h: r.height };
+        };
+      }
+      function center(R){ return { x: R.x + R.w/2, y: R.y + R.h/2 }; }
+      function overlaps(A,B,p){
+        return !(A.x > B.x + B.w + p || B.x > A.x + A.w + p || A.y > B.y + B.h + p || B.y > A.y + A.h + p);
+      }
+      function mtv(A,B){
+        const ac = center(A), bc = center(B);
+        const dx = bc.x - ac.x, dy = bc.y - ac.y;
+        const px = (A.w/2 + B.w/2) - Math.abs(dx);
+        const py = (A.h/2 + B.h/2) - Math.abs(dy);
+        if (px <= 0 || py <= 0) return null;
+        if (px < py) return { x: Math.sign(dx) * px, y: 0 };
+        return { x: 0, y: Math.sign(dy) * py };
+      }
+      function rectCirclePenetration(R, Cx, Cy, Cr){
+        const rx = Math.max(R.x, Math.min(Cx, R.x + R.w));
+        const ry = Math.max(R.y, Math.min(Cy, R.y + R.h));
+        const qx = Cx - rx, qy = Cy - ry;
+        const d2 = qx*qx + qy*qy;
+        const r  = Cr + PAD;
+        if (d2 >= r*r) return null;
+        const d = Math.max(1e-6, Math.sqrt(d2));
+        const ux = qx / d, uy = qy / d;
+        const pen = r - d;
+        return { x: -ux * pen, y: -uy * pen };
+      }
+      function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+      function ensureWrap(el){
+        let txt = el.querySelector('.ttxt');
+        if (!txt){
+          const span = document.createElement('span');
+          span.className = 'ttxt';
+          span.textContent = el.textContent;
+          el.textContent = '';
+          el.appendChild(span);
+          txt = span;
+        }
+        return txt;
+      }
+
+      function collect(rect){
+        const items=[];
+        map.eachLayer(lyr=>{
+          if (!(lyr instanceof L.CircleMarker)) return;
+          const tt = (lyr.getTooltip && lyr.getTooltip()) || null;
+          if (!tt) return;
+          if (!tt._container) tt.update();
+          const el = tt._container;
+          if (!el || !el.classList.contains('iata-tt')) return;
+
+          const cls = Array.from(el.classList);
+          const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
+          const txt = ensureWrap(el);
+          txt.style.transform = 'translate(0px,0px)'; // reset to measure
+          const baseRect = rect(txt);
+          const latlng = lyr.getLatLng();
+          const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
+          const pt = map.latLngToContainerPoint(latlng);
+          const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
+          items.push({ el, txt, size, baseRect, latlng, radius, pt, color, dx:0, dy:0, density:0 });
+        });
+        return items;
+      }
+
+      function scoreDensity(items){
+        const R = 70;
+        for (let i=0;i<items.length;i++){
+          let c=0;
+          for (let j=0;j<items.length;j++){
+            if (i===j) continue;
+            const dx = items[i].pt.x - items[j].pt.x;
+            const dy = items[i].pt.y - items[j].pt.y;
+            if (dx*dx + dy*dy <= R*R) c++;
           }
-        })();
-        """
+          items[i].density = c;
+        }
+      }
 
+      function rectFrom(it, dx, dy){
+        return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
+      }
 
-    # Substitute tokens (no ${...} conflicts) and put JS in the script bucket
+      // cluster by dot proximity; only group if labels still overlap post-solve
+      function buildClusters(items, finals){
+        const n = items.length;
+        const parent = Array.from({length:n}, (_,i)=>i);
+        function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
+        function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
+
+        for(let i=0;i<n;i++){
+          for(let j=i+1;j<n;j++){
+            const dx = items[i].pt.x - items[j].pt.x;
+            const dy = items[i].pt.y - items[j].pt.y;
+            if (dx*dx + dy*dy <= STACK_R*STACK_R){
+              if (overlaps(finals[i], finals[j], PAD)) uni(i,j);
+            }
+          }
+        }
+        const groups = new Map();
+        for(let i=0;i<n;i++){
+          const r = find(i);
+          if(!groups.has(r)) groups.set(r, []);
+          groups.get(r).push(i);
+        }
+        return Array.from(groups.values()).filter(g => g.length >= 2);
+      }
+
+      function drawStackForCluster(clusterIdxs, items, finals){
+        const pane = map.getPanes().tooltipPane;
+        if (!pane) return;
+
+        // hide individual labels in the cluster
+        clusterIdxs.forEach(i => { items[i].el.style.display = 'none'; });
+
+        // cluster bbox in screen coords
+        let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+        clusterIdxs.forEach(i=>{
+          const R = finals[i];
+          minX = Math.min(minX, R.x);
+          minY = Math.min(minY, R.y);
+          maxX = Math.max(maxX, R.x + R.w);
+          maxY = Math.max(maxY, R.y + R.h);
+        });
+
+        // sort rows vertically (stable)
+        const rows = clusterIdxs.slice().sort((a,b)=> items[a].pt.y - items[b].pt.y);
+
+        const div = document.createElement('div');
+        div.className = 'iata-stack';
+        rows.forEach(i=>{
+          const r = document.createElement('div');
+          r.className = 'row';
+          const dot = document.createElement('span');
+          dot.className = 'dot';
+          dot.style.background = items[i].color;
+          const t = document.createElement('span');
+          t.textContent = items[i].txt.textContent;
+          r.appendChild(dot);
+          r.appendChild(t);
+          div.appendChild(r);
+        });
+        pane.appendChild(div);
+
+        const mapW = map.getSize().x, mapH = map.getSize().y;
+        const width  = div.getBoundingClientRect().width;
+        const height = div.getBoundingClientRect().height;
+
+        let x = Math.round(maxX + LIST_OFFSET);
+        let y = Math.round(minY);
+
+        // clamp inside map view
+        y = Math.max(LIST_MAX_HEIGHT_PAD, Math.min(y, mapH - height - LIST_MAX_HEIGHT_PAD));
+        if (x + width > mapW - 2){
+          x = Math.round(minX - LIST_OFFSET - width);
+        }
+        x = Math.max(2, Math.min(x, mapW - width - 2));
+
+        div.style.left = x + "px";
+        div.style.top  = y + "px";
+      }
+
+      function clearStacks(){
+        const pane = map.getPanes().tooltipPane;
+        if (!pane) return;
+        pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
+      }
+
+      function solve(){
+        const rect = rectBase();
+        let items = collect(rect);
+        if (!items.length) return;
+
+        // remove any previously drawn stacks
+        clearStacks();
+
+        const z = map.getZoom();
+        const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
+        let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
+        if (maxZ == null) maxZ = 19;
+        const span = Math.max(1, Math.round(EXTFRAC * (maxZ - minZ)));
+
+        items.forEach(it=>{
+          const baseGate = (SHOWZ[it.size] || 7);
+          const extGate  = Math.max(minZ, baseGate - span);
+          it.__baseGate = baseGate; it.__extGate = extGate;
+          if (z < extGate) it.el.style.display = 'none';
+          else it.el.style.display = 'block';
+          it.txt.style.opacity = '1';
+          it.dx = 0; it.dy = 0;
+        });
+
+        items = items.filter(it => it.el.style.display !== 'none');
+        if (!items.length) return;
+
+        scoreDensity(items);
+        items.sort((a,b)=>{
+          const d = b.density - a.density; if (d) return d;
+          const pr = PRIOR[a.size] - PRIOR[b.size]; if (pr) return pr;
+          return (a.pt.y - b.pt.y) || (a.pt.x - b.pt.x);
+        });
+
+        const W = map.getSize().x, H = map.getSize().y;
+        const boundsMargin = 2;
+
+        // relaxation pass
+        for (let t=0; t<ITERS; t++){
+          const rects = items.map(it => rectFrom(it, it.dx, it.dy));
+          const fx = new Array(items.length).fill(0);
+          const fy = new Array(items.length).fill(0);
+
+          for (let i=0;i<items.length;i++){
+            for (let j=i+1;j<items.length;j++){
+              const v = mtv(rects[i], rects[j]);
+              if (!v) continue;
+              fx[i] -= v.x * 0.5; fy[i] -= v.y * 0.5;
+              fx[j] += v.x * 0.5; fy[j] += v.y * 0.5;
+            }
+          }
+
+          for (let i=0;i<items.length;i++){
+            const it = items[i];
+            const R  = rects[i];
+            const pen = rectCirclePenetration(R, it.pt.x, it.pt.y, it.radius + 2);
+            if (pen){ fx[i] += pen.x; fy[i] += pen.y; }
+            fx[i] += -0.05 * it.dx;
+            fy[i] += -0.05 * it.dy;
+
+            if (R.x < boundsMargin) fx[i] += (boundsMargin - R.x);
+            if (R.y < boundsMargin) fy[i] += (boundsMargin - R.y);
+            if (R.x + R.w > W - boundsMargin) fx[i] -= (R.x + R.w - (W - boundsMargin));
+            if (R.y + R.h > H - boundsMargin) fy[i] -= (R.y + R.h - (H - boundsMargin));
+          }
+
+          for (let i=0;i<items.length;i++){
+            items[i].dx = clamp(items[i].dx + FSTEP*fx[i], -DRIFT, DRIFT);
+            items[i].dy = clamp(items[i].dy + FSTEP*fy[i], -DRIFT, DRIFT);
+          }
+        }
+
+        // apply transforms
+        const finals = items.map(it => rectFrom(it, it.dx, it.dy));
+        for (let i=0;i<items.length;i++){
+          const it = items[i];
+          const R  = finals[i];
+          let collides = false;
+          for (let j=0;j<items.length;j++){
+            if (i===j) continue;
+            if (overlaps(R, finals[j], PAD)) { collides = true; break; }
+          }
+          const inExt = (z < it.__baseGate) && (z >= it.__extGate);
+          if (!inExt || !collides){
+            it.el.style.display = 'block';
+            it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
+            if (collides) it.txt.style.opacity = "0.9";
+          } else {
+            it.txt.style.transform = "translate(" + Math.round(it.dx) + "px, " + Math.round(it.dy) + "px)";
+          }
+        }
+
+        // stacked list stage
+        const clusters = buildClusters(items, finals);
+        if (clusters.length){
+          clusters.forEach(g => drawStackForCluster(g, items, finals));
+        }
+      }
+
+      // schedule
+      let raf1=0, raf2=0;
+      function schedule(){
+        if (raf1) cancelAnimationFrame(raf1);
+        if (raf2) cancelAnimationFrame(raf2);
+        raf1 = requestAnimationFrame(function(){ raf2 = requestAnimationFrame(solve); });
+      }
+      map.whenReady(function(){ setTimeout(schedule, 400); });
+      map.on('zoomend moveend overlayadd overlayremove layeradd layerremove', schedule);
+
+      const pane = map.getPanes().tooltipPane;
+      if (pane && 'MutationObserver' in window){
+        const mo = new MutationObserver(schedule);
+        mo.observe(pane, { childList:true, subtree:true, attributes:true, attributeFilter:['style','class'] });
+      }
+    }
+  } catch (err) {
+    console.error("[ACA] solver r3.6-stacks crashed:", err);
+  }
+})();
+"""
+
+    # Substitute tokens and add JS to the script bucket
     js = js.replace("__MAP__", m.get_name())
     js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
-    js = js.replace("__PAD__",  str(int(PAD_PX)))
+    js = js.replace("__PAD__", str(int(PAD_PX)))
     js = js.replace("__DRIFT__", str(int(DRIFT_PX)))
     js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
-    js = js.replace("__ITERS__",  str(int(ITERS)))
-    js = js.replace("__FSTEP__",  str(FSTEP))
+    js = js.replace("__ITERS__", str(int(ITERS)))
+    js = js.replace("__FSTEP__", str(FSTEP))
 
     m.get_root().script.add_child(folium.Element(js))
     return m
