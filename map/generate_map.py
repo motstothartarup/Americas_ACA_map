@@ -31,14 +31,22 @@ STROKE = 2
 
 LABEL_GAP_PX = 10
 SHOW_AT = dict(large=2, medium=3, small=4)   # base gates; ~20% extension at runtime
-PAD_PX = 4
+PAD_PX = 4                                    # ↑ makes overlap detection a bit more sensitive
 
 # Placement solver knobs
-DRIFT_PX = 18     # max distance a label may move from its dot (px)
-ITERS = 216        # relaxation iterations
-FSTEP = 0.5      # solver step (0.45–0.65 good)
+DRIFT_PX = 18     # max label drift from dot (px)
+ITERS = 16        # relaxation iterations
+FSTEP = 0.50      # solver step
 
 EXT_FRACTION = 0.20  # ~20% of zoom range for “extended keep”
+
+# --- NEW behavior knobs (you can tweak these) ---
+DOT_HIDE_BELOW_Z = 4         # hide all DOTS (not labels) when zoom < this
+ALIGN_LEFT_AT_Z   = 6        # when zoom <= this, stacks anchor LEFT of cluster bbox
+STACK_R_PX        = 52       # screen-pixel proximity that triggers stacking
+NEAR_MILES        = 50       # “same city” clustering radius (miles)
+LIST_OFFSET_PX    = 12       # gap between cluster bbox and stacked list
+STACK_ROW_GAP_PX  = 4        # extra space between rows in a stack
 
 OUT_DIR = "docs"
 OUT_FILE = os.path.join(OUT_DIR, "index.html")
@@ -166,7 +174,7 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    SOLVER_VER = "solver-r3.6-stacks"
+    SOLVER_VER = "solver-r3.7-stacks+city+hide"
 
     # --- CSS + footer badge (tokens replaced inline) ---
     badge_html = (
@@ -202,7 +210,7 @@ def build_map() -> folium.Map:
   padding:6px 8px; box-shadow:0 2px 12px rgba(0,0,0,.14);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
 }
-.iata-stack .row{ line-height:1.15; white-space:nowrap; }
+.iata-stack .row{ line-height:1.30; white-space:nowrap; margin: __ROWGAP__px 0; }
 .iata-stack .dot{
   display:inline-block; width:6px; height:6px; border-radius:50%;
   margin-right:6px; border:1px solid rgba(0,0,0,.25);
@@ -213,6 +221,7 @@ def build_map() -> folium.Map:
 """
         .replace("__UPDATED__", updated)
         .replace("__VER__", SOLVER_VER)
+        .replace("__ROWGAP__", str(int(STACK_ROW_GAP_PX)))
     )
     m.get_root().html.add_child(folium.Element(badge_html))
 
@@ -252,11 +261,11 @@ def build_map() -> folium.Map:
 
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # --- JS: physics-style relaxation + stacked list fallback (no <script> tags) ---
+    # --- JS: relaxation + stacked lists + city clustering + dot hiding (no <script> tags) ---
     js = r"""
 (function(){
   try {
-    console.debug("[ACA] solver r3.6-stacks start");
+    console.debug("[ACA] solver r3.7-stacks+city+hide start");
 
     const MAP = __MAP__;
     const SHOWZ = __SHOWZ__;
@@ -267,10 +276,13 @@ def build_map() -> folium.Map:
     const ITERS = __ITERS__;
     const FSTEP = __FSTEP__;
 
-    // clustering/stacking knobs (px)
-    const STACK_R = 80;         // cluster radius in pixels (dot proximity)
-    const LIST_OFFSET = 12;     // gap from cluster box to list
-    const LIST_MAX_HEIGHT_PAD = 6;
+    // behavior/stack knobs
+    const DOT_HIDE_Z   = __DOT_HIDE_Z__;
+    const ALIGN_LEFT_Z = __ALIGN_LEFT_Z__;
+    const STACK_R      = __STACK_R__;
+    const LIST_OFFSET  = __LIST_OFFSET__;
+    const NEAR_MILES   = __NEAR_MILES__;
+    const ROW_GAP      = __ROW_GAP__;
 
     function until(cond, cb, tries=80, delay=100){
       (function tick(n){
@@ -288,13 +300,7 @@ def build_map() -> folium.Map:
 
     function init(){
       const map = MAP;
-      console.debug("[ACA] solver r3.6-stacks init on", map);
-
-      // quick outline to prove the script executed
-      const styleTag = document.createElement("style");
-      styleTag.textContent = ".iata-tt{ outline:1px dashed rgba(0,0,0,.25) }";
-      document.head.appendChild(styleTag);
-      setTimeout(()=> styleTag.remove(), 1200);
+      console.debug("[ACA] solver r3.7 init on", map);
 
       function getContainer(){ return map.getContainer(); }
       function rectBase(){
@@ -356,13 +362,13 @@ def build_map() -> folium.Map:
           const cls = Array.from(el.classList);
           const size = (cls.find(c=>c.startsWith('size-'))||'size-small').slice(5);
           const txt = ensureWrap(el);
-          txt.style.transform = 'translate(0px,0px)'; // reset to measure
+          txt.style.transform = 'translate(0px,0px)'; // reset
           const baseRect = rect(txt);
           const latlng = lyr.getLatLng();
           const radius = (typeof lyr.getRadius==='function') ? lyr.getRadius() : 6;
           const pt = map.latLngToContainerPoint(latlng);
           const color = (lyr.options && (lyr.options.fillColor || lyr.options.color)) || "#666";
-          items.push({ el, txt, size, baseRect, latlng, radius, pt, color, dx:0, dy:0, density:0 });
+          items.push({ el, txt, size, baseRect, latlng, radius, pt, color, dx:0, dy:0, density:0, marker:lyr });
         });
         return items;
       }
@@ -385,19 +391,28 @@ def build_map() -> folium.Map:
         return { x: it.baseRect.x + dx, y: it.baseRect.y + dy, w: it.baseRect.w, h: it.baseRect.h };
       }
 
-      // cluster by dot proximity; only group if labels still overlap post-solve
-      function buildClusters(items, finals){
+      // cluster by proximity; if two dots are within NEAR_MILES, treat as same-city
+      function buildClusters(items, finals, z){
         const n = items.length;
         const parent = Array.from({length:n}, (_,i)=>i);
         function find(a){ return parent[a]===a ? a : (parent[a]=find(parent[a])); }
         function uni(a,b){ a=find(a); b=find(b); if(a!==b) parent[b]=a; }
 
+        const nearMeters = NEAR_MILES * 1609.344;
+
         for(let i=0;i<n;i++){
           for(let j=i+1;j<n;j++){
             const dx = items[i].pt.x - items[j].pt.x;
             const dy = items[i].pt.y - items[j].pt.y;
-            if (dx*dx + dy*dy <= STACK_R*STACK_R){
-              if (overlaps(finals[i], finals[j], PAD)) uni(i,j);
+            const screenClose = (dx*dx + dy*dy) <= (STACK_R*STACK_R);
+            const geoClose = map.distance(items[i].latlng, items[j].latlng) <= nearMeters;
+
+            // If labels still overlap, always union.
+            // If "same city" (<= 50mi) and we're zoomed out enough (<= ALIGN_LEFT_Z),
+            // union even if labels don't overlap so we get a tidy left-justified list.
+            const stillOverlap = overlaps(finals[i], finals[j], PAD);
+            if (stillOverlap || (geoClose && z <= ALIGN_LEFT_Z) || (screenClose && stillOverlap)){
+              uni(i,j);
             }
           }
         }
@@ -410,7 +425,7 @@ def build_map() -> folium.Map:
         return Array.from(groups.values()).filter(g => g.length >= 2);
       }
 
-      function drawStackForCluster(clusterIdxs, items, finals){
+      function drawStackForCluster(clusterIdxs, items, finals, z){
         const pane = map.getPanes().tooltipPane;
         if (!pane) return;
 
@@ -435,6 +450,8 @@ def build_map() -> folium.Map:
         rows.forEach(i=>{
           const r = document.createElement('div');
           r.className = 'row';
+          r.style.marginTop = ROW_GAP + "px";
+          r.style.marginBottom = ROW_GAP + "px";
           const dot = document.createElement('span');
           dot.className = 'dot';
           dot.style.background = items[i].color;
@@ -450,14 +467,22 @@ def build_map() -> folium.Map:
         const width  = div.getBoundingClientRect().width;
         const height = div.getBoundingClientRect().height;
 
-        let x = Math.round(maxX + LIST_OFFSET);
-        let y = Math.round(minY);
+        // placement: if zoomed out enough, anchor LEFT of the cluster bbox
+        const forceLeft = (z <= ALIGN_LEFT_Z);
+        let x, y;
+        y = Math.round(minY);
+        if (forceLeft){
+          x = Math.round(minX - LIST_OFFSET - width);
+        }else{
+          x = Math.round(maxX + LIST_OFFSET);
+          // if off right edge, place left
+          if (x + width > mapW - 2) {
+            x = Math.round(minX - LIST_OFFSET - width);
+          }
+        }
 
         // clamp inside map view
-        y = Math.max(LIST_MAX_HEIGHT_PAD, Math.min(y, mapH - height - LIST_MAX_HEIGHT_PAD));
-        if (x + width > mapW - 2){
-          x = Math.round(minX - LIST_OFFSET - width);
-        }
+        y = Math.max(6, Math.min(y, mapH - height - 6));
         x = Math.max(2, Math.min(x, mapW - width - 2));
 
         div.style.left = x + "px";
@@ -470,15 +495,27 @@ def build_map() -> folium.Map:
         pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
       }
 
+      function hideOrShowDots(items, z){
+        items.forEach(it=>{
+          if (!it.marker || !it.marker.setStyle) return;
+          if (z < DOT_HIDE_Z){
+            it.marker.setStyle({ opacity: 0, fillOpacity: 0 });
+          }else{
+            it.marker.setStyle({ opacity: 1, fillOpacity: 0.95 });
+          }
+        });
+      }
+
       function solve(){
         const rect = rectBase();
         let items = collect(rect);
         if (!items.length) return;
 
-        // remove any previously drawn stacks
         clearStacks();
 
         const z = map.getZoom();
+        hideOrShowDots(items, z); // NEW: dot visibility by zoom
+
         const minZ = (typeof map.getMinZoom === 'function' && map.getMinZoom()) || 0;
         let maxZ = (typeof map.getMaxZoom === 'function' && map.getMaxZoom());
         if (maxZ == null) maxZ = 19;
@@ -562,10 +599,10 @@ def build_map() -> folium.Map:
           }
         }
 
-        // stacked list stage
-        const clusters = buildClusters(items, finals);
+        // stacked list stage (includes “same city” clustering)
+        const clusters = buildClusters(items, finals, z);
         if (clusters.length){
-          clusters.forEach(g => drawStackForCluster(g, items, finals));
+          clusters.forEach(g => drawStackForCluster(g, items, finals, z));
         }
       }
 
@@ -586,19 +623,27 @@ def build_map() -> folium.Map:
       }
     }
   } catch (err) {
-    console.error("[ACA] solver r3.6-stacks crashed:", err);
+    console.error("[ACA] solver r3.7-stacks+city+hide crashed:", err);
   }
 })();
 """
 
     # Substitute tokens and add JS to the script bucket
-    js = js.replace("__MAP__", m.get_name())
-    js = js.replace("__SHOWZ__", json.dumps(SHOW_AT))
-    js = js.replace("__PAD__", str(int(PAD_PX)))
-    js = js.replace("__DRIFT__", str(int(DRIFT_PX)))
-    js = js.replace("__EXTFRAC__", str(EXT_FRACTION))
-    js = js.replace("__ITERS__", str(int(ITERS)))
-    js = js.replace("__FSTEP__", str(FSTEP))
+    js = (js
+          .replace("__MAP__", m.get_name())
+          .replace("__SHOWZ__", json.dumps(SHOW_AT))
+          .replace("__PAD__", str(int(PAD_PX)))
+          .replace("__DRIFT__", str(int(DRIFT_PX)))
+          .replace("__EXTFRAC__", str(EXT_FRACTION))
+          .replace("__ITERS__", str(int(ITERS)))
+          .replace("__FSTEP__", str(FSTEP))
+          .replace("__DOT_HIDE_Z__", str(int(DOT_HIDE_BELOW_Z)))
+          .replace("__ALIGN_LEFT_Z__", str(int(ALIGN_LEFT_AT_Z)))
+          .replace("__STACK_R__", str(int(STACK_R_PX)))
+          .replace("__LIST_OFFSET__", str(int(LIST_OFFSET_PX)))
+          .replace("__NEAR_MILES__", str(float(NEAR_MILES)))
+          .replace("__ROW_GAP__", str(int(STACK_ROW_GAP_PX)))
+          )
 
     m.get_root().script.add_child(folium.Element(js))
     return m
