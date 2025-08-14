@@ -1,0 +1,122 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ACA Airports — Region Table</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+<meta http-equiv="Pragma" content="no-cache"/>
+<meta http-equiv="Expires" content="0"/>
+<style>
+  :root {
+    --card-bg:#fff; --ink:#39424e; --muted:#6b7785; --accent:#0d6efd; --border:#e6e8ec;
+  }
+  body {
+    margin:0; padding:24px; font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    color:var(--ink); background:#f6f8fb;
+  }
+  .wrap { max-width:1100px; margin:0 auto; }
+  .card {
+    background:var(--card-bg); border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,.08);
+    padding:20px 20px;
+  }
+  h1 { margin:0 0 12px 0; font-size:22px; }
+  .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:13px; }
+  select {
+    font:14px/1.2 inherit; padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:#fff;
+  }
+  table {
+    width:100%; border-collapse:separate; border-spacing:0; margin-top:14px; font-size:14px;
+  }
+  thead th {
+    text-align:left; font-weight:600; padding:10px 12px; border-bottom:1px solid var(--border);
+    background:#fafbfc; position:sticky; top:0;
+  }
+  tbody td {
+    padding:10px 12px; border-bottom:1px solid var(--border);
+    vertical-align:top;
+  }
+  td.lvl { font-weight:700; width:110px; white-space:nowrap; }
+  td.count { text-align:right; width:80px; color:var(--muted); }
+  td.codes code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size:13px; background:#f5f7fb; padding:2px 6px; border-radius:6px; margin:2px 6px 2px 0; display:inline-block;
+  }
+  .footer { margin-top:10px; }
+</style>
+
+<div class="wrap">
+  <div class="card">
+    <div class="row">
+      <h1>ACA Airports by Region</h1>
+      <div class="muted">Last updated: 2025-08-14 16:05 UTC</div>
+    </div>
+    <div class="row" style="margin-top:8px;">
+      <label for="regionSelect" class="muted">Region:</label>
+      <select id="regionSelect" aria-label="Choose region"></select>
+    </div>
+
+    <table id="acaTable" aria-live="polite">
+      <thead>
+        <tr>
+          <th>ACA Level</th>
+          <th>Airport Codes</th>
+          <th style="text-align:right">Count</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <div class="footer muted">Codes are IATA; levels sorted 5 → 1.</div>
+  </div>
+</div>
+
+<script id="aca-data" type="application/json">{"levels_desc":["Level 5","Level 4+","Level 4","Level 3+","Level 3","Level 2","Level 1"],"regions":["Americas","Africa","Asia Pacific & Middle East","Europe"],"by_region":{"Americas":{"Level 5":[],"Level 4+":["DFW","SAN","SSA","UIO","YVR"],"Level 4":["BOG","DAL","FLN","LAX","MEA","PHX","SFO","VIX","VNY","YUL","YYZ"],"Level 3+":["AUS","CNF","GPS","GYE","SJO","STI"],"Level 3":["2R2","8A4","ACA","AGU","AUA","AZS","BJX","BRX","CJS","CUL","CUN","CUU","CZM","DGO","DTW","EFD","EPS","EWR","EYE","FDF","GDL","GIG","HNL","HOU","HUX","IAH","IND","JBQ","JFK","KOA","LAP","LGA","LIH","LIM","MID","MLM","MQJ","MSP","MTT","MTY","MXL","MZT","OAK","OAX","PHL","POP","PTP","PVR","QRO","REX","SDQ","SEA","SFG","SLC","SLP","SWF","TAM","TAP","TEB","TRC","UMP","VER","VSA","YEG","YHZ","YLW","YOW","YQB","YWG","YYG","ZCL","ZIH","ZLO"],"Level 2":["AEP","BDA","BFI","BSB","BUR","CMH","COR","CRD","CUR","EZE","GRR","HMO","IGR","JAC","KIN","LGB","LIR","LMM","MBJ","MDZ","MVD","PIT","PNE","PUJ","SAT","SBP","SCL","SJC","SJD","SJU","SSF","TIJ","TPA","YCD","YMM","YQM","YQQ","YQR","YQT","YXE","YYJ"],"Level 1":["ABQ","AJU","APF","ATL","BOS","BRC","BTV","CLQ","CLT","CME","CPV","CVG","CVM","CWB","GYN","HSH","IGU","ITO","JDO","JPA","JUJ","LAS","LTO","MCZ","MIA","NAS","NLU","NVT","OGG","PAZ","PBC","PDP","PRA","PXM","REC","RGA","SDF","SDU","SLA","SLZ","TCN","TPQ","TUC","TVY","U42","VGT","YFC","YHM","YHU","YKF","YRQ","YSJ","YTZ","YYC","YYT"]},"Africa":{"Level 5":[],"Level 4+":["ABJ","RUN"],"Level 4":["NBE"],"Level 3+":["BZV","LBV"],"Level 3":["CMN","DSS","DUR","DZA","EDL","KIS","MBA","NBO","NOS","RAK","RBA","TNR"],"Level 2":["CPT","FEZ","JNB","KGL","LFW","LOS","MIR","PLZ","ZSE"],"Level 1":["AGA","ASK","BVC","BYK","CKY","HGO","HLA","JIB","JRO","KEO","LUN","MJC","MMO","OUD","PNR","RAI","SFL","SID","SNE","SPY","TNG","VXE"]},"Asia Pacific & Middle East":{"Level 5":["BLR","CHC","DEL","HYD"],"Level 4+":["AMM","BOM","NPE","NTL","WLG","ZQN"],"Level 4":["ADL","AKL","BAH","BNE","CBR","DXB","HKG","HLZ","ICN","ITM","KIX","NAN","NGO","NRT","PMR","RUH","SYD","TPE","UKB","YPPF"],"Level 3+":["MCY","SHJ"],"Level 3":["AUH","DOH","DRW","DUD","DWC","KHH","KOS","KUL","MEL","PER","PNH","SIN","SLL"],"Level 2":["ATQ","BDQ","BHO","BME","CCJ","CJB","DED","DIB","HBX","IDR","IMF","ISA","IXA","IXM","IXR","IXU","JED","LRE","MAA","MED","MFM","NOU","NPL","OOL","PAT","PHE","PPT","RJA","RPR","STV","TIR","TRZ","TSV","UDR","VGA"],"Level 1":["ABT","AHB","AJF","BHH","BKI","CEB","DMM","DQM","DWD","EAM","EJH","ELQ","GIZ","HAS","IVC","LGK","MCT","MEB","NSN","NUM","OERB","RAE","RAH","RAR","SHW","TIF","TUI","TUU","ULH","URY","WAE","YNB"]},"Europe":{"Level 5":["AMS","ARN","BYJ","EIN","FNC","GOT","HEL","IVL","KAO","KRN","KTT","MMX","NAP","OSD","PDL","RNB","RTM","RVN","TLN","VBY"],"Level 4+":["ATH","BLQ","BMA","BRS","BRU","BUD","CEQ","CIA","CPH","EDI","ESB","FAB","FAO","FCO","FLW","GVA","HOR","LCA","LCY","LGW","LHR","LIN","LIS","LLA","LTT","LUX","LYN","LYS","MXP","NCE","OPO","ORY","PFO","PXO","SMA","TLS","UME","VCE"],"Level 4":["BCN","BSL","BVA","CDG","CFN","CRL","IST","LBG","LGG","LTN","MAD","MRS","NCL","NTE","PMI","SOF","ZAG","ZRH"],"Level 3+":["ABZ","ADB","AGH","AYT","DUB","EMA","GLA","HAM","KEF","MAN","ORK","PMO","PRN","SDL","SOU","STN","TRN","TSF","VIE","VRN"],"Level 3":["AAL","AGP","ALC","ANE","AUF","BEG","BER","BFS","BGO","BGY","BHD","BHX","BOD","BOU","CCF","CER","CFE","CMF","CTA","DIJ","DLE","DLM","DUS","EGC","ERZ","FNI","FRA","GNB","IBZ","JER","KLR","LBA","LDE","LFBF","MAH","MLA","MPL","MST","MUC","NOC","OLB","OSL","OTP","PGF","PRG","PUF","QXB","QYR","RHE","RIX","RNS","SNR","STR","SVG","SXB","TIA","TLL","TRD","TRS","TUF","VNO","XCD"],"Level 2":["ACE","ACH","ADA","ADF","AHO","AJA","AJI","ANG","ANR","ASR","AUR","AVN","BAL","BBU","BES","BGG","BLL","BOH","BOJ","BQH","BVE","BYF","BZI","BZR","CAG","CDT","CFR","CGN","CKZ","CLJ","DBV","DIY","DNZ","DOL","EDO","ERC","EXT","EZS","FLR","FMM","GKD","GNY","GYD","GZP","GZT","HTY","IGD","ILD","ISE","KCM","KCO","KFS","KSY","KUN","KYA","LEU","LFDH","LFFI","LIG","LIL","LJU","LME","LRT","LYC","MLX","MQM","MSR","MZH","NAV","NCY","NKT","NOP","NWI","OGU","ORE","OST","PIS","PLQ","PSA","RDZ","SKP","SNN","SXZ","SZF","TBS","TEQ","TJK","TLV","TZX","URO","USQ","VAN","VAR","VAS","YEI","YKO"],"Level 1":["BJV","BUS","CFU","CHQ","DNR","DRS","EFL","ETM","EVN","GDN","INV","JMK","JSI","JTR","KGS","KRS","KVA","LEJ","MJT","PVK","RHO","SBZ","SCQ","SJJ","SKG","SMI","TGD","TIV","WAW","ZAD","ZTH"]}}}</script>
+<script>
+(function(){
+  const DATA = JSON.parse(document.getElementById('aca-data').textContent);
+  const sel = document.getElementById('regionSelect');
+  const tbody = document.querySelector('#acaTable tbody');
+
+  function option(value, text) { const o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
+
+  function render(region) {
+    const levels = DATA.levels_desc;
+    const buckets = DATA.by_region[region] || {};
+    tbody.innerHTML = '';
+    let total = 0;
+
+    levels.forEach(lvl => {
+      const codes = (buckets[lvl] || []).slice().sort();
+      total += codes.length;
+      const tr = document.createElement('tr');
+
+      const tdLvl = document.createElement('td'); tdLvl.className = 'lvl'; tdLvl.textContent = lvl;
+      const tdCodes = document.createElement('td'); tdCodes.className = 'codes';
+      const tdCount = document.createElement('td'); tdCount.className = 'count'; tdCount.textContent = String(codes.length);
+
+      if (codes.length) {
+        codes.forEach(c => {
+          const chip = document.createElement('code'); chip.textContent = c;
+          tdCodes.appendChild(chip);
+        });
+      } else {
+        tdCodes.innerHTML = '<span class="muted">—</span>';
+      }
+
+      tr.appendChild(tdLvl); tr.appendChild(tdCodes); tr.appendChild(tdCount);
+      tbody.appendChild(tr);
+    });
+
+    const trTotal = document.createElement('tr');
+    trTotal.innerHTML = '<td class="lvl">Total</td><td></td><td class="count">'+ total +'</td>';
+    tbody.appendChild(trTotal);
+  }
+
+  const regions = DATA.regions || [];
+  regions.forEach(r => sel.appendChild(option(r, r)));
+  const defaultRegion = regions.includes('Americas') ? 'Americas' : (regions[0] || '');
+  if (defaultRegion) sel.value = defaultRegion;
+
+  sel.addEventListener('change', () => render(sel.value));
+  render(sel.value);
+})();
+</script>
