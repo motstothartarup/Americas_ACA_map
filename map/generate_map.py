@@ -179,15 +179,9 @@ def build_map() -> folium.Map:
     groups = {lvl: folium.FeatureGroup(name=lvl, show=True).add_to(m) for lvl in LEVELS}
 
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    BUILD_VER = "base-r1.8-zoom+posdb+stack-out+miles+pane-anchoring+legend"
+    BUILD_VER = "base-r1.7-zoom+posdb+stack-out+miles+pane-anchoring"
 
-    # Build legend rows from LEVELS/PALETTE
-    legend_rows = "".join(
-        f'<div class="row"><span class="swatch" style="background:{PALETTE.get(lvl, "#666")}"></span>{lvl}</div>'
-        for lvl in LEVELS
-    )
-
-    # --- CSS + footer badge + zoom panel (meter + legend) ---
+    # --- CSS + footer badge + zoom meter + stack styles (labels-only look) ---
     badge_html = (
         r"""
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
@@ -213,36 +207,29 @@ def build_map() -> folium.Map:
   box-shadow:0 2px 8px rgba(0,0,0,.12);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
 }
-
-/* New: consolidated panel for zoom meter + legend, pushed down to avoid Leaflet controls */
-.zoom-panel{
-  position:absolute; left:12px; top:72px; z-index:9999;
-  background:#fff; padding:8px 10px; border-radius:8px;
+.zoom-meter{
+  position:absolute; left:12px; top:12px; z-index:9999;
+  background:#fff; padding:6px 8px; border-radius:8px;
   box-shadow:0 2px 8px rgba(0,0,0,.12);
   font:12px "Open Sans","Helvetica Neue",Arial,sans-serif; color:#485260;
   user-select:none; pointer-events:none;
 }
-.zoom-panel .zoom-meter{ margin-bottom:6px; }
-.zoom-panel .legend .row{
-  display:flex; align-items:center; line-height:1.15; margin:2px 0;
+/* Stack list styled like labels (no bg/border/shadow) */
+.iata-stack{
+  position:absolute; z-index:9998; pointer-events:none;
+  background:transparent; border:0; box-shadow:none;
+  font:12px "Open Sans","Helvetica Neue",Arial,sans-serif;
+  color:#6e6e6e; letter-spacing:0.5px; text-transform:uppercase;
+  font-weight:1000; text-align:left; white-space:nowrap;
 }
-.zoom-panel .legend .swatch{
-  display:inline-block; width:10px; height:10px; border-radius:50%;
-  border:2px solid #111; margin-right:6px;
-}
+.iata-stack .row{ line-height:1.0; margin: __ROWGAP__px 0; }
 </style>
 <div class="last-updated">Last updated: __UPDATED__ • __VER__</div>
-
-<div id="zoomPanel" class="zoom-panel">
-  <div id="zoomMeter" class="zoom-meter">Zoom: --%</div>
-  <div class="legend">
-    __LEGEND__
-  </div>
-</div>
+<div id="zoomMeter" class="zoom-meter">Zoom: --%</div>
 """
         .replace("__UPDATED__", updated)
         .replace("__VER__", BUILD_VER)
-        .replace("__LEGEND__", legend_rows)
+        .replace("__ROWGAP__", str(int(STACK_ROW_GAP_PX)))
     )
     m.get_root().html.add_child(folium.Element(badge_html))
 
@@ -445,40 +432,42 @@ def build_map() -> folium.Map:
         return Array.from(groups.values()).filter(g => g.length >= 2);
       }
 
-      // draw stack anchored at one member's label (topmost by y),
-      // then lift it upward so it hovers above the dot like a single label would.
-      function drawStack(groupIdxs, items){
-        const div = document.createElement('div');
-        div.className = 'iata-stack';
+    // draw stack anchored at one member's label (topmost by y),
+    // then lift it upward so it hovers above the dot like a single label would.
+    function drawStack(groupIdxs, items){
+      const div = document.createElement('div');
+      div.className = 'iata-stack';
+    
+      // anchor = topmost label in the group
+      const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
+      const anchorIdx = sorted[0];
+      const anchor = items[anchorIdx];
+    
+      // rows: plain text like labels
+      sorted.forEach(i=>{
+        const r = document.createElement('div');
+        r.className = 'row';
+        r.textContent = items[i].iata;
+        div.appendChild(r);
+      });
+      pane.appendChild(div);
+    
+      // after layout: position at anchor.x and lift by (stackHeight - singleLineHeight)
+      requestAnimationFrame(()=>{
+        const stackRect = div.getBoundingClientRect();   // just to get height
+        const extraH = Math.max(0, stackRect.height - anchor.label.h);
+        const left = Math.round(anchor.label.x);         // pane-relative coords
+        const top  = Math.round(anchor.label.y - extraH);
+        div.style.left = left + "px";
+        div.style.top  = top  + "px";
+      });
+    
+      return {
+        anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
+        iatas: sorted.map(i=>items[i].iata)
+      };
+    }
 
-        // anchor = topmost label in the group
-        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
-        const anchorIdx = sorted[0];
-        const anchor = items[anchorIdx];
-
-        // rows: plain text like labels
-        sorted.forEach(i=>{
-          const r = document.createElement('div');
-          r.className = 'row';
-          r.textContent = items[i].iata;
-          div.appendChild(r);
-        });
-        pane.appendChild(div);
-
-        // after layout: position at anchor.x and lift by (stackHeight - singleLineHeight)
-        requestAnimationFrame(()=>{
-          const stackRect = div.getBoundingClientRect();   // just to get height
-          const extraH = Math.max(0, stackRect.height - anchor.label.h);
-          const left = Math.round(anchor.label.x);         // pane-relative coords
-          const top  = Math.round(anchor.label.y - extraH);
-          div.style.left = left + "px";
-          div.style.top  = top  + "px";
-        });
-
-        return {
-          anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
-          iatas: sorted.map(i=>items[i].iata)
-        };
       }
 
       function applyClustering(items){
