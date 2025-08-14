@@ -432,8 +432,9 @@ def build_map() -> folium.Map:
         return Array.from(groups.values()).filter(g => g.length >= 2);
       }
 
-    // draw stack anchored at one member's label (topmost by y),
-    // then lift it upward so it hovers above the dot like a single label would.
+      // draw stack anchored at one member's label (topmost by y)
+      // draw stack anchored at one member's label (topmost by y),
+        // then lift it upward so it hovers above the dot like a single label would.
     function drawStack(groupIdxs, items){
       const div = document.createElement('div');
       div.className = 'iata-stack';
@@ -468,7 +469,6 @@ def build_map() -> folium.Map:
       };
     }
 
-      }
 
       function applyClustering(items){
         clearStacks();
