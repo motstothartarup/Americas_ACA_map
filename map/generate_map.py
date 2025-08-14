@@ -358,7 +358,7 @@ def build_map() -> folium.Map:
         pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = ''; });
       }
       function hideAllLabels(){
-        pane.querySelectorAll('.iata-tt').forEach el => { el.style.display = 'none'; });
+        pane.querySelectorAll('.iata-tt').forEach(el => { el.style.display = 'none'; });
       }
       function clearStacks(){
         pane.querySelectorAll('.iata-stack').forEach(n => n.remove());
@@ -434,40 +434,41 @@ def build_map() -> folium.Map:
 
       // draw stack anchored at one member's label (topmost by y)
       // draw stack anchored at one member's label (topmost by y),
-      // then lift it upward so it hovers above the dot like a single label would.
-      function drawStack(groupIdxs, items){
-        const div = document.createElement('div');
-        div.className = 'iata-stack';
+        // then lift it upward so it hovers above the dot like a single label would.
+    function drawStack(groupIdxs, items){
+      const div = document.createElement('div');
+      div.className = 'iata-stack';
+    
+      // anchor = topmost label in the group
+      const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
+      const anchorIdx = sorted[0];
+      const anchor = items[anchorIdx];
+    
+      // rows: plain text like labels
+      sorted.forEach(i=>{
+        const r = document.createElement('div');
+        r.className = 'row';
+        r.textContent = items[i].iata;
+        div.appendChild(r);
+      });
+      pane.appendChild(div);
+    
+      // after layout: position at anchor.x and lift by (stackHeight - singleLineHeight)
+      requestAnimationFrame(()=>{
+        const stackRect = div.getBoundingClientRect();   // just to get height
+        const extraH = Math.max(0, stackRect.height - anchor.label.h);
+        const left = Math.round(anchor.label.x);         // pane-relative coords
+        const top  = Math.round(anchor.label.y - extraH);
+        div.style.left = left + "px";
+        div.style.top  = top  + "px";
+      });
+    
+      return {
+        anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
+        iatas: sorted.map(i=>items[i].iata)
+      };
+    }
 
-        // anchor = topmost label in the group
-        const sorted = groupIdxs.slice().sort((a,b)=> items[a].label.y - items[b].label.y);
-        const anchorIdx = sorted[0];
-        const anchor = items[anchorIdx];
-
-        // rows: plain text like labels
-        sorted.forEach(i=>{
-          const r = document.createElement('div');
-          r.className = 'row';
-          r.textContent = items[i].iata;
-          div.appendChild(r);
-        });
-        pane.appendChild(div);
-
-        // after layout: position at anchor.x and lift by (stackHeight - singleLineHeight)
-        requestAnimationFrame(()=>{
-          const stackRect = div.getBoundingClientRect();   // just to get height
-          const extraH = Math.max(0, stackRect.height - anchor.label.h);
-          const left = Math.round(anchor.label.x);         // pane-relative coords
-          const top  = Math.round(anchor.label.y - extraH);
-          div.style.left = left + "px";
-          div.style.top  = top  + "px";
-        });
-
-        return {
-          anchor: { iata: anchor.iata, x: anchor.label.x, y: anchor.label.y },
-          iatas: sorted.map(i=>items[i].iata)
-        };
-      }
 
       function applyClustering(items){
         clearStacks();
@@ -484,7 +485,7 @@ def build_map() -> folium.Map:
         // only stack when zoomed OUT enough
         if (z > STACK_ON_AT_Z) return { stacks: [], hidden: [], hiddenAll:false };
 
-        const radiusPx = milesToPixels(GROUP_RADIUS_MILES);  # scales with zoom
+        const radiusPx = milesToPixels(GROUP_RADIUS_MILES);  // scales with zoom
         const clusters = buildClusters(items, radiusPx);
         const hidden = [];
         const stacks = [];
