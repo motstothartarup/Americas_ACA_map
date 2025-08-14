@@ -1,9 +1,6 @@
 # map/generate_table.py
 # Build docs/aca_table.html: dropdown to pick region, then a table
 # listing airport IATA codes grouped by ACA level (5 at top → 1 at bottom).
-#
-# Keeps it simple: fetch ACA page, parse with pandas/bs4, normalize regions,
-# and embed a tiny JSON payload the page uses to render the table.
 
 import io
 import json
@@ -86,17 +83,15 @@ def parse_aca_table(html: str) -> pd.DataFrame:
     return aca
 
 def make_payload(df: pd.DataFrame) -> dict:
-    # Regions present in the data
+    # Regions present in the data (prefer "Americas" first)
     regions = sorted(df["region4"].unique(), key=lambda x: (x != "Americas", x))
     # Group IATA codes by region and ACA level
     by_region = {}
     for reg in regions:
         sub = df[df["region4"] == reg]
-        # initialize all levels to empty list so rows are stable
         level_map = {lvl: [] for lvl in LEVELS_DESC}
         for lvl, block in sub.groupby("aca_level"):
             if lvl not in level_map:
-                # If a new/unknown level appears, add it at the end
                 level_map[lvl] = []
             codes = sorted(str(x).strip().upper() for x in block["iata"].dropna().unique())
             level_map[lvl].extend(codes)
@@ -110,57 +105,56 @@ def make_payload(df: pd.DataFrame) -> dict:
 def build_html(payload: dict) -> str:
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     data_json = json.dumps(payload, separators=(",", ":"))
-    # Basic, clean styling + tiny client JS to render the table
-    html = f"""<!doctype html>
+    html = """<!doctype html>
 <meta charset="utf-8">
 <title>ACA Airports — Region Table</title>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
 <meta http-equiv="Pragma" content="no-cache"/>
 <meta http-equiv="Expires" content="0"/>
 <style>
-  :root {{
+  :root {
     --card-bg:#fff; --ink:#39424e; --muted:#6b7785; --accent:#0d6efd; --border:#e6e8ec;
-  }}
-  body {{
+  }
+  body {
     margin:0; padding:24px; font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
     color:var(--ink); background:#f6f8fb;
-  }}
-  .wrap {{ max-width:1100px; margin:0 auto; }}
-  .card {{
+  }
+  .wrap { max-width:1100px; margin:0 auto; }
+  .card {
     background:var(--card-bg); border-radius:12px; box-shadow:0 4px 20px rgba(0,0,0,.08);
     padding:20px 20px;
-  }}
-  h1 {{ margin:0 0 12px 0; font-size:22px; }}
-  .row {{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; }}
-  .muted {{ color:var(--muted); font-size:13px; }}
-  select {{
+  }
+  h1 { margin:0 0 12px 0; font-size:22px; }
+  .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:13px; }
+  select {
     font:14px/1.2 inherit; padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:#fff;
-  }}
-  table {{
+  }
+  table {
     width:100%; border-collapse:separate; border-spacing:0; margin-top:14px; font-size:14px;
-  }}
-  thead th {{
+  }
+  thead th {
     text-align:left; font-weight:600; padding:10px 12px; border-bottom:1px solid var(--border);
     background:#fafbfc; position:sticky; top:0;
-  }}
-  tbody td {{
+  }
+  tbody td {
     padding:10px 12px; border-bottom:1px solid var(--border);
     vertical-align:top;
-  }}
-  td.lvl {{ font-weight:700; width:110px; white-space:nowrap; }}
-  td.count {{ text-align:right; width:80px; color:var(--muted); }}
-  td.codes code {{
+  }
+  td.lvl { font-weight:700; width:110px; white-space:nowrap; }
+  td.count { text-align:right; width:80px; color:var(--muted); }
+  td.codes code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     font-size:13px; background:#f5f7fb; padding:2px 6px; border-radius:6px; margin:2px 6px 2px 0; display:inline-block;
-  }}
-  .footer {{ margin-top:10px; }}
+  }
+  .footer { margin-top:10px; }
 </style>
 
 <div class="wrap">
   <div class="card">
     <div class="row">
       <h1>ACA Airports by Region</h1>
-      <div class="muted">Last updated: {updated}</div>
+      <div class="muted">Last updated: __UPDATED__</div>
     </div>
     <div class="row" style="margin-top:8px;">
       <label for="regionSelect" class="muted">Region:</label>
@@ -182,32 +176,32 @@ def build_html(payload: dict) -> str:
   </div>
 </div>
 
-<script id="aca-data" type="application/json">{data_json}</script>
+<script id="aca-data" type="application/json">__DATA_JSON__</script>
 <script>
 (function(){
   const DATA = JSON.parse(document.getElementById('aca-data').textContent);
   const sel = document.getElementById('regionSelect');
   const tbody = document.querySelector('#acaTable tbody');
 
-  function option(value, text){ const o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
+  function option(value, text) { const o = document.createElement('option'); o.value = value; o.textContent = text; return o; }
 
-  function render(region){
+  function render(region) {
     const levels = DATA.levels_desc;
     const buckets = DATA.by_region[region] || {};
     tbody.innerHTML = '';
     let total = 0;
 
-    levels.forEach(lvl=>{
+    levels.forEach(lvl => {
       const codes = (buckets[lvl] || []).slice().sort();
       total += codes.length;
       const tr = document.createElement('tr');
 
       const tdLvl = document.createElement('td'); tdLvl.className = 'lvl'; tdLvl.textContent = lvl;
       const tdCodes = document.createElement('td'); tdCodes.className = 'codes';
-      const tdCount = document.createElement('td'); tdCount.className = 'count'; tdCount.textContent = codes.length.toString();
+      const tdCount = document.createElement('td'); tdCount.className = 'count'; tdCount.textContent = String(codes.length);
 
-      if (codes.length){
-        codes.forEach(c=>{
+      if (codes.length) {
+        codes.forEach(c => {
           const chip = document.createElement('code'); chip.textContent = c;
           tdCodes.appendChild(chip);
         });
@@ -219,24 +213,22 @@ def build_html(payload: dict) -> str:
       tbody.appendChild(tr);
     });
 
-    // optional: a total row
     const trTotal = document.createElement('tr');
-    trTotal.innerHTML = '<td class="lvl">Total</td><td></td><td class="count">'+total+'</td>';
+    trTotal.innerHTML = '<td class="lvl">Total</td><td></td><td class="count">'+ total +'</td>';
     tbody.appendChild(trTotal);
   }
 
-  // populate region selector
   const regions = DATA.regions || [];
   regions.forEach(r => sel.appendChild(option(r, r)));
   const defaultRegion = regions.includes('Americas') ? 'Americas' : (regions[0] || '');
   if (defaultRegion) sel.value = defaultRegion;
 
-  sel.addEventListener('change', ()=> render(sel.value));
+  sel.addEventListener('change', () => render(sel.value));
   render(sel.value);
 })();
 </script>
 """
-    return html
+    return html.replace("__UPDATED__", updated).replace("__DATA_JSON__", data_json)
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -250,19 +242,17 @@ def main():
         print("Wrote", OUT_FILE)
     except Exception as e:
         print("ERROR building table:", e, file=sys.stderr)
-        # minimal fallback
         updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        fallback = f"""<!doctype html><meta charset="utf-8">
+        fallback = """<!doctype html><meta charset="utf-8">
 <title>ACA Airports — Region Table</title>
-<style>body{{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:24px;color:#233;max-width:900px;margin:auto;background:#f6f8fb}}
-.card{{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);padding:20px}}
-</style>
+<style>body{font:16px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;padding:24px;color:#233;max-width:900px;margin:auto;background:#f6f8fb}
+.card{background:#fff;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);padding:20px}</style>
 <div class="card">
   <h1>ACA Airports by Region</h1>
   <p><strong>Status:</strong> temporarily unavailable.</p>
-  <p><strong>Reason:</strong> {str(e)}</p>
-  <p>Last attempt: {updated}. This page updates when the generator runs.</p>
-</div>"""
+  <p><strong>Reason:</strong> __ERR__</p>
+  <p>Last attempt: __UPDATED__. This page updates when the generator runs.</p>
+</div>""".replace("__ERR__", str(e)).replace("__UPDATED__", updated)
         with open(OUT_FILE, "w", encoding="utf-8") as f:
             f.write(fallback)
         sys.exit(0)
