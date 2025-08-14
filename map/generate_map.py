@@ -36,8 +36,8 @@ LABEL_GAP_PX = 10  # vertical gap between dot and label
 # --- Zoom tuning knobs (ONLY zoom logic uses these) ---
 ZOOM_SNAP = 0.10           # allow fractional zoom
 ZOOM_DELTA = 0.25          # keyboard +/- step
-WHEEL_PX_PER_ZOOM = 220    # higher = gentler wheel zoom
-WHEEL_DEBOUNCE_MS = 15     # smaller = more responsive wheel
+WHEEL_PX_PER_ZOOM = 300    # higher = gentler wheel zoom
+WHEEL_DEBOUNCE_MS = 10     # smaller = more responsive wheel
 
 # --- Position DB knobs ---
 DB_MAX_HISTORY = 200       # keep last N snapshots
@@ -45,7 +45,7 @@ UPDATE_DEBOUNCE_MS = 120   # debounce for move/zoom updates
 
 # --- Stacking behavior ---
 STACK_ON_AT_Z = 7.5        # stacks when z <= this (zoomed OUT). Tweak (e.g., 8.3)
-HIDE_LABELS_BELOW_Z = 5.7  # hide ALL labels when z < this; restore when z >= this
+HIDE_LABELS_BELOW_Z = 5  # hide ALL labels when z < this; restore when z >= this
 
 # --- Grouping distance in real-world miles (converted to pixels per zoom) ---
 GROUP_RADIUS_MILES = 30.0  # ~30 miles
