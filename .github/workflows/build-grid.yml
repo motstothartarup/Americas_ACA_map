@@ -1,0 +1,54 @@
+name: Build competitor grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      iata:
+        description: "IATA code (e.g., LAX)"
+        required: true
+        default: "LAX"
+      wsize:
+        description: "Total passengers weight"
+        required: true
+        default: "85"
+      wgrowth:
+        description: "Growth weight"
+        required: true
+        default: "5"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: map/master_code
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Make docs dir
+        run: mkdir -p docs
+
+      - name: Build grid HTML
+        run: |
+          python -m outputs.grid.build_grid \
+            --iata "${{ github.event.inputs.iata }}" \
+            --wsize "${{ github.event.inputs.wsize }}" \
+            --wgrowth "${{ github.event.inputs.wgrowth }}" \
+            --out docs/grid.html
+
+      - name: Upload artifact (grid)
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-${{ github.event.inputs.iata }}-${{ github.run_id }}
+          path: map/master_code/docs/grid.html
