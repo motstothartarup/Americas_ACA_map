@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Local data & large files
+data/local/
+*.xlsx
+
+# Generated pages
+docs/*.html
+docs/runs/
