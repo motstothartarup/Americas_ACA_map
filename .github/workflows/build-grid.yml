@@ -16,6 +16,9 @@ on:
         required: true
         default: "5"
 
+permissions:
+  contents: write   # allow the job to commit to the repo
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,19 +39,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Make docs dir
-        run: mkdir -p docs
-
       - name: Build grid HTML
         run: |
+          mkdir -p docs
           python -m outputs.grid.build_grid \
             --iata "${{ github.event.inputs.iata }}" \
             --wsize "${{ github.event.inputs.wsize }}" \
             --wgrowth "${{ github.event.inputs.wgrowth }}" \
             --out docs/grid.html
 
-      - name: Upload artifact (grid)
-        uses: actions/upload-artifact@v4
-        with:
-          name: grid-${{ github.event.inputs.iata }}-${{ github.run_id }}
-          path: map/master_code/docs/grid.html
+      # Copy to the REPO ROOT /docs so GitHub Pages can serve it
+      - name: Move file into site /docs with a unique path
+        run: |
+          RUN_DIR="../../docs/runs/${{ github.event.inputs.iata }}-${{ github.event.inputs.wsize }}-${{ github.event.inputs.wgrowth }}-${{ github.run_id }}"
+          mkdir -p "$RUN_DIR"
+          cp docs/grid.html "$RUN_DIR/index.html"
+          echo "RUN_DIR=$RUN_DIR" >> $GITHUB_ENV
+
+      - name: Commit & push site files
+        run: |
+          cd ../..
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/runs
+          git commit -m "Add grid for ${{ github.event.inputs.iata }} (run ${{ github.run_id }})" || echo "Nothing to commit"
+          git push
+
+      - name: Print the live URL
+        run: |
+          REPO=${{ github.repository }}
+          USER_OR_ORG=${REPO%%/*}
+          NAME=${REPO#*/}
+          echo "URL: https://${USER_OR_ORG}.github.io/${NAME}/runs/${{ github.event.inputs.iata }}-${{ github.event.inputs.wsize }}-${{ github.event.inputs.wgrowth }}-${{ github.run_id }}/"
